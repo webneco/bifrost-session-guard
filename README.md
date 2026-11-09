@@ -169,6 +169,19 @@ A tool call counts as "the same" when the tool name matches and the JSON argumen
 
 **Accounting.** After each call the guard adds the tokens and the cost Bifrost calculated to the session. A streamed response is counted once, on its final chunk.
 
+## Technologies used
+
+| Part | Technology |
+| --- | --- |
+| Gateway | [Bifrost](https://github.com/maximhq/bifrost) v2.5.0 by Maxim AI, built from its unmodified source |
+| Plugin | Go 1.27, built as a Go plugin (`-buildmode=plugin`). Its only dependency outside the standard library is Bifrost's `core/schemas` package. |
+| Loop detection | Plain Go with FNV-1a and `hash/maphash` signatures. No model, database or external service is involved. |
+| Status page and API | Go's `net/http`, with one embedded page of plain HTML, CSS and JavaScript. No front-end framework. |
+| Demo and end-to-end tests | Node.js 22 with its built-in test runner and no npm packages: a scripted OpenAI-compatible mock provider and a small tool-calling agent |
+| Build and packaging | Bash scripts, Make and a multi-stage Dockerfile |
+| Continuous integration | GitHub Actions: unit tests, end-to-end tests, the demo and the Docker image on every push |
+| AI coding tool | Claude (Anthropic). See [How AI was used](#how-ai-was-used). |
+
 ## What a client sees
 
 Every guarded response carries these headers:
