@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 
-	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/webneco/bifrost-session-guard/guard"
 )
@@ -132,6 +131,19 @@ func (p *Plugin) PreRequestHook(_ *schemas.BifrostContext, _ *schemas.BifrostReq
 	return nil
 }
 
+// isStreamRequest reports whether a request type streams its response. The plugin depends
+// only on Bifrost's schemas package, which keeps the list of packages it must share with
+// the gateway short; this mirrors the helper in Bifrost's core package.
+func isStreamRequest(t schemas.RequestType) bool {
+	return strings.HasSuffix(string(t), "_stream")
+}
+
+// isFinalChunk reports whether the current post-hook call is for the last chunk of a stream.
+func isFinalChunk(ctx *schemas.BifrostContext) bool {
+	done, _ := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator).(bool)
+	return done
+}
+
 func ctxString(ctx *schemas.BifrostContext, key schemas.BifrostContextKey) string {
 	if ctx == nil {
 		return ""
@@ -200,7 +212,7 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 		c = &carrier{}
 		ctx.SetValue(ctxKeyCarrier, c)
 	}
-	c.set(key, &d, bifrost.IsStreamRequestType(req.RequestType))
+	c.set(key, &d, isStreamRequest(req.RequestType))
 
 	switch d.Action {
 	case guard.ActionBlock:
@@ -332,7 +344,7 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if d != nil && d.Action == guard.ActionBlock {
 		return resp, bifrostErr, nil // our own short-circuit: nothing was spent
 	}
-	if stream && !bifrost.IsFinalChunk(ctx) {
+	if stream && !isFinalChunk(ctx) {
 		return resp, bifrostErr, nil
 	}
 
