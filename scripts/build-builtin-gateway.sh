@@ -31,7 +31,12 @@ for f in $FILES; do
   mkdir -p "$OV/tree/$(dirname "$f")"
   cp "$SRC/$f" "$OV/tree/$f"
 done
-(cd "$OV/tree" && git apply -p1 "$PATCH")
+# GIT_CEILING_DIRECTORIES stops git from noticing the repository this directory sits in.
+# Inside a repository, "git apply" quietly skips files outside the current directory.
+(cd "$OV/tree" && GIT_CEILING_DIRECTORIES="$OV" git apply -p1 "$PATCH")
+for f in $FILES; do
+  grep -q "sessionguard" "$OV/tree/$f" || { echo "the patch did not apply to $f" >&2; exit 1; }
+done
 
 cp "$SRC/transports/go.mod" "$OV/go.mod"
 cp "$SRC/transports/go.sum" "$OV/go.sum"
