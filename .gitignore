@@ -1,0 +1,16 @@
+# Build output
+/build/
+/.work/
+*.so
+*.test
+*.out
+
+# Gateway runtime data created by the demo
+/demo/data/
+*.db
+*.db-shm
+*.db-wal
+
+.env
+.DS_Store
+node_modules/
