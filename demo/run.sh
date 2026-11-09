@@ -15,9 +15,11 @@ GATEWAY="${GATEWAY:-$ROOT/.work/bin/bifrost-http}"
 PLUGIN_SO="${PLUGIN_SO:-$ROOT/build/session-guard.so}"
 DATA="$ROOT/demo/data"
 GW_PORT="${GW_PORT:-8080}"
+GW_HOST="${GW_HOST:-127.0.0.1}"
 export MOCK_URL="http://127.0.0.1:${MOCK_PORT:-7300}"
 export STATUS_ADDR="${STATUS_ADDR:-127.0.0.1:9797}"
 export BUDGET_USD="${BUDGET_USD:-0.06}"
+STATUS_LOCAL="127.0.0.1:${STATUS_ADDR##*:}"
 VK="sk-bf-demo-team"
 KEEP=""
 [ "${1:-}" = "--keep" ] && KEEP=1
@@ -38,7 +40,7 @@ wait_for() { # url, name
 start_gateway() { # mode
   rm -rf "$DATA/$1" && mkdir -p "$DATA/$1"
   "$ROOT/demo/make-config.sh" "$DATA/$1" "$1" "$PLUGIN_SO" >/dev/null
-  "$GATEWAY" -port "$GW_PORT" -app-dir "$DATA/$1" > "$DATA/gateway-$1.log" 2>&1 &
+  "$GATEWAY" -host "$GW_HOST" -port "$GW_PORT" -app-dir "$DATA/$1" > "$DATA/gateway-$1.log" 2>&1 &
   GW_PID=$!
   PIDS+=("$GW_PID")
   wait_for "http://127.0.0.1:$GW_PORT/health" "gateway"
@@ -69,7 +71,7 @@ echo "  The stuck agent ran until the key's budget was gone, and the budget then
 
 bold "Act 2: with the session guard"
 start_gateway on
-wait_for "http://$STATUS_ADDR/healthz" "session guard"
+wait_for "http://$STATUS_LOCAL/healthz" "session guard"
 echo "  Agent A (stuck):"
 agent --session agent-a --scenario stubborn --max-turns 40 | sed 's/^/  /'
 echo
@@ -80,7 +82,7 @@ echo "  Agent C (stuck, but it listens when told it is repeating itself):"
 agent --session agent-c --scenario loop | sed 's/^/  /'
 
 bold "What the guard recorded"
-curl -s "http://$STATUS_ADDR/api/sessions" | node -e '
+curl -s "http://$STATUS_LOCAL/api/sessions" | node -e '
   let d = ""; process.stdin.on("data", (c) => (d += c)).on("end", () => {
     const rows = JSON.parse(d).sort((a, b) => a.id.localeCompare(b.id));
     console.log("  session   state     requests  blocked  nudges  tokens    spent");
@@ -92,7 +94,7 @@ curl -s "http://$STATUS_ADDR/api/sessions" | node -e '
 
 if [ -n "$KEEP" ]; then
   bold "Still running"
-  echo "  Session guard dashboard:  http://$STATUS_ADDR"
+  echo "  Session guard dashboard:  http://$STATUS_LOCAL"
   echo "  Bifrost dashboard:        http://127.0.0.1:$GW_PORT"
   echo "  Press Ctrl+C to stop."
   wait "$GW_PID"

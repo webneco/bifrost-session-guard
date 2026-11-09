@@ -66,10 +66,10 @@ func chatConversation(r *schemas.BifrostChatRequest, window int) guard.Conversat
 		switch m.Role {
 		case schemas.ChatMessageRoleSystem, schemas.ChatMessageRoleDeveloper:
 			if sysSig == 0 {
-				sysSig = guard.SigString(chatText(m.Content))
+				sysSig = guard.StableSig(chatText(m.Content))
 			}
 		case schemas.ChatMessageRoleUser:
-			userSig = guard.SigString(chatText(m.Content))
+			userSig = guard.StableSig(chatText(m.Content))
 		}
 		if userSig != 0 {
 			break
@@ -174,7 +174,7 @@ func responsesConversation(r *schemas.BifrostResponsesRequest, window int) guard
 
 	var sysSig, userSig uint64
 	if r.Params != nil && r.Params.Instructions != nil {
-		sysSig = guard.SigString(*r.Params.Instructions)
+		sysSig = guard.StableSig(*r.Params.Instructions)
 	}
 	for i := 0; i < len(in) && i < rootScan; i++ {
 		m := &in[i]
@@ -184,10 +184,10 @@ func responsesConversation(r *schemas.BifrostResponsesRequest, window int) guard
 		switch *m.Role {
 		case schemas.ResponsesInputMessageRoleSystem, schemas.ResponsesInputMessageRoleDeveloper:
 			if sysSig == 0 {
-				sysSig = guard.SigString(responsesText(m.Content))
+				sysSig = guard.StableSig(responsesText(m.Content))
 			}
 		case schemas.ResponsesInputMessageRoleUser:
-			userSig = guard.SigString(responsesText(m.Content))
+			userSig = guard.StableSig(responsesText(m.Content))
 		}
 		if userSig != 0 {
 			break

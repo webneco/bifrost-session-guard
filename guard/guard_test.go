@@ -255,16 +255,52 @@ func TestToolCallsWithoutIDsPairInOrder(t *testing.T) {
 	}
 }
 
-func TestLongResultsAreSampledNotIgnored(t *testing.T) {
+func TestLongResultsAreComparedInFull(t *testing.T) {
 	big := strings.Repeat("x", 100_000)
 	if SigString(big+"a") == SigString(big+"b") {
 		t.Fatal("results differing at the end must have different signatures")
 	}
-	if SigString("a"+big) == SigString("b"+big) {
-		t.Fatal("results differing at the start must have different signatures")
+	mid := big[:50_000] + "y" + big[50_001:]
+	if SigString(big) == SigString(mid) {
+		t.Fatal("results differing in the middle must have different signatures")
 	}
-	if SigString(big) == SigString(big+"x") {
-		t.Fatal("results of different length must have different signatures")
+}
+
+func TestToolCallSignatureIgnoresFormattingOnly(t *testing.T) {
+	same := [][2]string{
+		{`{"a":1,"b":"x y"}`, `{ "b" : "x y" , "a" : 1 }`},
+		{`{"a":{"k":[1,2,3]},"b":null}`, "{\n  \"b\": null,\n  \"a\": {\"k\": [1, 2, 3]}\n}"},
+		{`{}`, ` { } `},
+		{`{"q":"a,b"}`, `{ "q": "a,b" }`},
+	}
+	for _, p := range same {
+		if SigToolCall("t", p[0]) != SigToolCall("t", p[1]) {
+			t.Errorf("%s and %s should have the same signature", p[0], p[1])
+		}
+	}
+	different := [][2]string{
+		{`{"a":1}`, `{"a":2}`},
+		{`{"a":1,"b":2}`, `{"a":2,"b":1}`},
+		{`{"a":"x y"}`, `{"a":"xy"}`},  // whitespace inside a string is significant
+		{`{"a":[1,2]}`, `{"a":[2,1]}`}, // array order is significant
+		{`{"a":1}`, `{"a":1,"b":1}`},
+		{`{"path":"a.go"}`, `{"path":"b.go"}`},
+		{`not json`, `not  json`},
+	}
+	for _, p := range different {
+		if SigToolCall("t", p[0]) == SigToolCall("t", p[1]) {
+			t.Errorf("%s and %s should have different signatures", p[0], p[1])
+		}
+	}
+	if SigToolCall("read", `{"a":1}`) == SigToolCall("write", `{"a":1}`) {
+		t.Error("different tools must have different signatures")
+	}
+}
+
+func TestFingerprintSignatureIsStable(t *testing.T) {
+	// FNV-1a of "abc": a fixed value, so the session id derived from it survives restarts.
+	if got := StableSig("abc"); got != 0xe71fa2190541574b {
+		t.Fatalf("StableSig(abc) = %#x", got)
 	}
 }
 
@@ -294,6 +330,9 @@ func TestEngineNudgesThenBlocks(t *testing.T) {
 	}
 	if s.TokensAvoided != 1000 || s.CostAvoided <= 0 {
 		t.Fatalf("avoided estimates not recorded: %+v", s)
+	}
+	if s.Trail != "aaannnb" {
+		t.Fatalf("trail = %q, want aaannnb", s.Trail)
 	}
 }
 

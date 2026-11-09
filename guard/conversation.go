@@ -1,10 +1,6 @@
 package guard
 
-import (
-	"bytes"
-	"encoding/json"
-	"strings"
-)
+import "hash/maphash"
 
 // Kind classifies one item of a conversation.
 type Kind uint8
@@ -50,25 +46,20 @@ type Conversation struct {
 	RootSig uint64
 }
 
-// sigHeadBytes and sigTailBytes bound how much of a long string is hashed. Tool results can be
-// megabytes; hashing the length plus the head and tail keeps the cost per item flat.
-const (
-	sigHeadBytes = 4096
-	sigTailBytes = 1024
-)
+// seed keys the content signatures. They are only ever compared with each other inside one
+// process, so a per-process seed is fine and lets us use the runtime's fast hash.
+var seed = maphash.MakeSeed()
+
+// SigString returns a signature for a piece of text, for comparing items within a request.
+// It is not stable across processes; use StableSig for anything that must be.
+func SigString(s string) uint64 {
+	return maphash.String(seed, s)
+}
 
 const (
 	fnvOffset64 = 14695981039346656037
 	fnvPrime64  = 1099511628211
 )
-
-func fnvString(h uint64, s string) uint64 {
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= fnvPrime64
-	}
-	return h
-}
 
 func fnvUint64(h uint64, v uint64) uint64 {
 	for i := 0; i < 8; i++ {
@@ -79,17 +70,18 @@ func fnvUint64(h uint64, v uint64) uint64 {
 	return h
 }
 
-// SigString returns a signature (FNV-1a) for a piece of text. Long text is sampled, see sigHeadBytes.
-func SigString(s string) uint64 {
-	if len(s) <= sigHeadBytes+sigTailBytes {
-		return fnvString(fnvOffset64, s)
+// StableSig returns an FNV-1a signature that is the same in every process and on every
+// replica. The conversation fingerprint uses it, because it becomes a session id.
+func StableSig(s string) uint64 {
+	h := uint64(fnvOffset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= fnvPrime64
 	}
-	h := fnvUint64(fnvOffset64, uint64(len(s)))
-	h = fnvString(h, s[:sigHeadBytes])
-	return fnvString(h, s[len(s)-sigTailBytes:])
+	return h
 }
 
-// Mix combines signatures into one. Order matters.
+// Mix combines signatures into one. Order matters. The result is stable when its inputs are.
 func Mix(sigs ...uint64) uint64 {
 	h := uint64(fnvOffset64)
 	for _, s := range sigs {
@@ -98,35 +90,81 @@ func Mix(sigs ...uint64) uint64 {
 	return h
 }
 
-// SigToolCall returns a signature for a tool call. Arguments that are valid JSON are
-// canonicalised first, so key order and whitespace do not hide a repeat.
+// SigToolCall returns a signature for a tool call. Two calls get the same signature when
+// they name the same tool and their JSON arguments differ only in whitespace or in the
+// order of the top-level keys, so reformatting does not hide a repeat.
 func SigToolCall(name, arguments string) uint64 {
-	return Mix(SigString(name), SigString(CanonicalJSON(arguments)))
+	return Mix(SigString(name), sigJSONArgs(arguments))
 }
 
-// CanonicalJSON re-encodes a JSON document with sorted keys and no insignificant whitespace.
-// Text that is not valid JSON is returned trimmed.
-func CanonicalJSON(s string) string {
-	t := strings.TrimSpace(s)
-	if t == "" {
-		return ""
+func isJSONSpace(c byte) bool { return c == ' ' || c == '\n' || c == '\t' || c == '\r' }
+
+// sigJSONArgs hashes a JSON object in one pass without allocating. Whitespace outside
+// strings is skipped at every depth. The top-level members are hashed separately and
+// combined with addition, which makes their order irrelevant. Anything that is not a JSON
+// object is hashed as trimmed text.
+func sigJSONArgs(s string) uint64 {
+	i, j := 0, len(s)
+	for i < j && isJSONSpace(s[i]) {
+		i++
 	}
-	if t[0] != '{' && t[0] != '[' {
-		return t
+	for j > i && isJSONSpace(s[j-1]) {
+		j--
 	}
-	dec := json.NewDecoder(strings.NewReader(t))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return t
+	s = s[i:j]
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return SigString(s)
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return t
+	var (
+		sum     uint64
+		members uint64
+		h       = uint64(fnvOffset64)
+		depth   = 0
+		inStr   = false
+		esc     = false
+		any     = false
+	)
+	flush := func() {
+		if any {
+			sum += h
+			members++
+		}
+		h, any = fnvOffset64, false
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	for k := 1; k < len(s)-1; k++ {
+		c := s[k]
+		if inStr {
+			h = (h ^ uint64(c)) * fnvPrime64
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch {
+		case isJSONSpace(c):
+			continue
+		case c == '"':
+			inStr = true
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+		case c == ',' && depth == 0:
+			flush()
+			continue
+		}
+		h = (h ^ uint64(c)) * fnvPrime64
+		any = true
+	}
+	if inStr || depth != 0 {
+		return SigString(s) // not well-formed: fall back to the text itself
+	}
+	flush()
+	return Mix(sum, members)
 }
 
 type elemKind uint8
@@ -146,6 +184,8 @@ type element struct {
 	// loose identifies a step by its call alone, whatever it returned.
 	loose uint64
 	name  string
+	// callID links a step to its result while pairing.
+	callID string
 	// done is false for a tool call whose result is not in the window.
 	done bool
 }
@@ -156,39 +196,47 @@ type element struct {
 // dropped, because models reword that text ("let me try again") while repeating the same call.
 func elements(items []Item) []element {
 	out := make([]element, 0, len(items))
-	pendingByID := make(map[string]int)
-	var pendingFIFO []int
+	// open holds the indexes of calls still waiting for a result. Results follow their calls
+	// closely, so this stays short and a scan beats a map.
+	var openBuf [8]int
+	open := openBuf[:0]
 
 	for _, it := range items {
 		switch it.Kind {
 		case KindToolCall:
-			idx := len(out)
-			out = append(out, element{kind: elemStep, loose: it.Sig, name: it.Name})
-			if it.CallID != "" {
-				pendingByID[it.CallID] = idx
-			} else {
-				pendingFIFO = append(pendingFIFO, idx)
-			}
+			open = append(open, len(out))
+			out = append(out, element{kind: elemStep, loose: it.Sig, name: it.Name, callID: it.CallID})
 		case KindToolResult:
-			idx := -1
+			at := -1
 			if it.CallID != "" {
-				if i, ok := pendingByID[it.CallID]; ok {
-					idx = i
-					delete(pendingByID, it.CallID)
+				for k := len(open) - 1; k >= 0; k-- {
+					if out[open[k]].callID == it.CallID {
+						at = k
+						break
+					}
 				}
 			}
-			if idx == -1 && len(pendingFIFO) > 0 {
-				idx = pendingFIFO[0]
-				pendingFIFO = pendingFIFO[1:]
+			if at == -1 {
+				// No id, or an id we have not seen: pair with the oldest open call that has no id.
+				for k := 0; k < len(open); k++ {
+					if out[open[k]].callID == "" {
+						at = k
+						break
+					}
+				}
 			}
-			if idx >= 0 {
+			if at >= 0 {
+				idx := open[at]
 				out[idx].strict = Mix(out[idx].loose, it.Sig)
 				out[idx].done = true
+				open = append(open[:at], open[at+1:]...)
 			}
 		case KindAssistantText:
-			out = append(out, element{kind: elemAssistantText, strict: Mix(1, it.Sig), loose: Mix(1, it.Sig), done: true})
+			sig := Mix(1, it.Sig)
+			out = append(out, element{kind: elemAssistantText, strict: sig, loose: sig, done: true})
 		case KindUser:
-			out = append(out, element{kind: elemUser, strict: Mix(2, it.Sig), loose: Mix(2, it.Sig), done: true})
+			sig := Mix(2, it.Sig)
+			out = append(out, element{kind: elemUser, strict: sig, loose: sig, done: true})
 		}
 	}
 
@@ -208,10 +256,12 @@ func elements(items []Item) []element {
 
 // convSig identifies the request's conversation as a whole, for spotting an unchanged resend.
 func convSig(c Conversation) uint64 {
-	h := make([]uint64, 0, len(c.Items)+3)
-	h = append(h, SigString(c.Model), uint64(c.Total), c.RootSig)
-	for _, it := range c.Items {
-		h = append(h, uint64(it.Kind), it.Sig)
+	h := fnvUint64(fnvOffset64, SigString(c.Model))
+	h = fnvUint64(h, uint64(c.Total))
+	h = fnvUint64(h, c.RootSig)
+	for i := range c.Items {
+		h = fnvUint64(h, uint64(c.Items[i].Kind))
+		h = fnvUint64(h, c.Items[i].Sig)
 	}
-	return Mix(h...)
+	return h
 }

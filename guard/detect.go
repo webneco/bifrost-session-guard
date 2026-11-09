@@ -91,9 +91,13 @@ func detectLoops(els []element, cfg LoopsConfig) *Finding {
 	if n < 2 {
 		return nil
 	}
-	ignored := make(map[string]struct{}, len(cfg.IgnoreTools))
-	for _, t := range cfg.IgnoreTools {
-		ignored[t] = struct{}{}
+	isIgnored := func(tool string) bool {
+		for _, t := range cfg.IgnoreTools {
+			if t == tool {
+				return true
+			}
+		}
+		return false
 	}
 	strict := func(i int) uint64 { return els[i].strict }
 	loose := func(i int) uint64 { return els[i].loose }
@@ -112,7 +116,7 @@ func detectLoops(els []element, cfg LoopsConfig) *Finding {
 			case elemStep:
 				steps++
 				tools = append(tools, el.name)
-				if _, ok := ignored[el.name]; !ok {
+				if !isIgnored(el.name) {
 					allIgnored = false
 				}
 			case elemAssistantText:

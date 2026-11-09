@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -443,5 +444,55 @@ func TestStatusServer(t *testing.T) {
 	res.Body.Close()
 	if n := len(p.Engine().Sessions()); n != 0 {
 		t.Fatalf("reset should forget the session, %d left", n)
+	}
+}
+
+// ---- cost of the pre-hook ----
+
+// BenchmarkPreLLMHook measures the whole decision for a long agent conversation: reducing
+// the request to a conversation, hashing the window and evaluating the rules.
+func BenchmarkPreLLMHook(b *testing.B) {
+	p, err := New(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer p.Cleanup()
+
+	// 400 messages of varied work, each tool result about 2 KB.
+	in := []schemas.ChatMessage{
+		chatMsg(schemas.ChatMessageRoleSystem, strings.Repeat("You are a coding agent. ", 200)),
+		chatMsg(schemas.ChatMessageRoleUser, "Refactor the parser."),
+	}
+	for i := 0; i < 200; i++ {
+		id := fmt.Sprintf("call_%d", i)
+		in = append(in,
+			schemas.ChatMessage{
+				Role: schemas.ChatMessageRoleAssistant,
+				ChatAssistantMessage: &schemas.ChatAssistantMessage{ToolCalls: []schemas.ChatAssistantMessageToolCall{{
+					ID:       sp(id),
+					Function: schemas.ChatAssistantMessageToolCallFunction{Name: sp("read_file"), Arguments: fmt.Sprintf(`{"path":"file_%d.go"}`, i)},
+				}}},
+			},
+			schemas.ChatMessage{
+				Role:            schemas.ChatMessageRoleTool,
+				Content:         &schemas.ChatMessageContent{ContentStr: sp(strings.Repeat(fmt.Sprintf("line %d of the file\n", i), 100))},
+				ChatToolMessage: &schemas.ChatToolMessage{ToolCallID: sp(id)},
+			},
+		)
+	}
+	req := &schemas.BifrostRequest{
+		RequestType: schemas.ChatCompletionRequest,
+		ChatRequest: &schemas.BifrostChatRequest{Provider: schemas.OpenAI, Model: "gpt-4o-mini", Input: in},
+	}
+	ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeySessionID, "bench")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ctx.SetValue(schemas.BifrostContextKeyRequestID, strconv.Itoa(i))
+		if _, sc, _ := p.PreLLMHook(ctx, req); sc != nil {
+			b.Fatal("unexpected block")
+		}
 	}
 }

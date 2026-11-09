@@ -1,1 +1,316 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Session guard</title></head><body><p>Session guard status. See <a href="/api/sessions">/api/sessions</a>.</p></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session guard</title>
+<style>
+  :root {
+    --bg: #edf0f3; --panel: #ffffff; --ink: #17212b; --muted: #5c6875; --line: #cdd4dc;
+    --flow: #2c7a64; --amber: #b97a00; --trip: #c0321f; --focus: #1f5fbf;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11171e; --panel: #18202a; --ink: #e6ebf0; --muted: #93a0ae; --line: #2c3743;
+      --flow: #58b69b; --amber: #e0a52e; --trip: #f0624d; --focus: #7fb0ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  main { max-width: 1120px; margin: 0 auto; padding: 40px 24px 64px; }
+  h1 { font-size: 28px; line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 6px; }
+  h2 { font-size: 20px; line-height: 1.3; font-weight: 650; margin: 48px 0 12px; }
+  p { margin: 0; }
+  .lede { font-size: 17px; max-width: 70ch; }
+  .lede strong { font-weight: 650; }
+  .sub { color: var(--muted); margin-top: 4px; font-size: 13px; }
+  .trip { color: var(--trip); } .amber { color: var(--amber); } .flow { color: var(--flow); }
+  .id { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; font-size: 13px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-top: 28px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 780px; }
+  th { text-align: left; font-weight: 600; font-size: 13px; color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--line); }
+  tr:last-child > td { border-bottom: 0; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  td.seen { white-space: nowrap; }
+  .who { min-width: 150px; }
+  .who .vk { color: var(--muted); font-size: 13px; }
+  .state { white-space: nowrap; font-weight: 600; }
+  .state::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 8px; background: currentColor; border-radius: 1px; }
+  .why { color: var(--muted); font-size: 13px; margin-top: 6px; min-width: 24ch; max-width: 46ch; }
+
+  /* The trail: one mark per request, oldest on the left. A tripped session ends in a tall red bar. */
+  .trail { display: flex; align-items: flex-end; gap: 3px; height: 22px; min-width: 150px; }
+  .trail i { display: block; width: 7px; height: 12px; border-radius: 1px; background: var(--flow); opacity: .45; }
+  .trail i.w, .trail i.n { background: var(--amber); opacity: 1; height: 16px; }
+  .trail i.b { background: var(--trip); opacity: 1; height: 22px; width: 9px; }
+
+  button {
+    font: inherit; font-size: 13px; color: var(--ink); background: transparent;
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { border-color: var(--ink); }
+  button.confirm { color: var(--trip); border-color: var(--trip); }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .empty { padding: 28px 18px; max-width: 70ch; }
+  .rules { margin: 0; padding: 0; list-style: none; max-width: 78ch; }
+  .rules li { padding: 9px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(220px, 2fr) 3fr; gap: 16px; }
+  .rules li:last-child { border-bottom: 0; }
+  .rules .off { color: var(--muted); }
+  .key { display: flex; gap: 20px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 12px; }
+  .key span { display: inline-flex; align-items: flex-end; gap: 7px; }
+  .key .trail { min-width: 0; height: 22px; }
+
+  form.token { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input { font: inherit; padding: 5px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); min-width: 260px; }
+  .problem { margin-top: 18px; color: var(--trip); }
+  @media (max-width: 640px) {
+    main { padding: 24px 16px 48px; }
+    .rules li { grid-template-columns: 1fr; gap: 2px; }
+    .rules li span:first-child { font-weight: 600; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Session guard</h1>
+  <p class="lede" id="lede">Loading sessions.</p>
+  <p class="sub" id="sub"></p>
+  <p class="problem" id="problem" hidden></p>
+  <form class="token" id="tokenForm" hidden>
+    <label for="token">Status token</label>
+    <input id="token" type="password" autocomplete="off">
+    <button type="submit">Use token</button>
+  </form>
+
+  <div class="panel" id="panel" hidden>
+    <table>
+      <thead>
+        <tr>
+          <th>Session</th><th>State</th><th>Latest requests</th>
+          <th class="num">Requests</th><th class="num">Tokens</th><th class="num">Spent</th><th>Last seen</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="key" id="key" hidden>
+    <span><span class="trail"><i></i></span> allowed</span>
+    <span><span class="trail"><i class="n"></i></span> warned or nudged</span>
+    <span><span class="trail"><i class="b"></i></span> blocked</span>
+    <span>oldest request on the left</span>
+  </div>
+
+  <h2>Rules in force</h2>
+  <ul class="rules" id="rules"></ul>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const plural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+const money = (v) => "$" + (v >= 1 ? v.toFixed(2) : v.toFixed(4));
+
+let token = "";
+try { token = sessionStorage.getItem("session-guard-token") || ""; } catch { /* storage unavailable */ }
+const confirming = new Set();
+
+async function api(path, init = {}) {
+  const headers = { ...(init.headers || {}) };
+  if (token) headers.Authorization = "Bearer " + token;
+  const res = await fetch(path, { ...init, headers });
+  if (res.status === 401) throw Object.assign(new Error("token"), { needsToken: true });
+  if (!res.ok) throw new Error(`${path} answered ${res.status}`);
+  return res.json();
+}
+
+function ago(iso, now) {
+  const s = Math.max(0, Math.round((now - new Date(iso)) / 1000));
+  if (s < 5) return "just now";
+  if (s < 90) return `${s} s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  return `${Math.round(s / 3600)} h ago`;
+}
+
+// span turns a Go duration such as "2h0m0s" into "2 h".
+function span(d) {
+  const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?$/.exec(d || "");
+  if (!m) return d;
+  const parts = [];
+  if (+m[1]) parts.push(`${+m[1]} h`);
+  if (+m[2]) parts.push(`${+m[2]} min`);
+  if (+m[3]) parts.push(`${+m[3]} s`);
+  return parts.join(" ") || "0 s";
+}
+
+const stateWord = { ok: "Fine", warned: "Warned", nudged: "Nudged", blocked: "Blocked" };
+const stateClass = { ok: "flow", warned: "amber", nudged: "amber", blocked: "trip" };
+const trailWord = { a: "allowed", w: "warned", n: "nudged", b: "blocked" };
+
+function trail(str) {
+  const t = el("div", "trail");
+  t.setAttribute("role", "img");
+  t.setAttribute("aria-label", str ? "Latest requests, oldest first: " + [...str].map((c) => trailWord[c] || c).join(", ") : "No requests yet");
+  for (const c of str || "") t.appendChild(el("i", c === "a" ? "" : c));
+  return t;
+}
+
+function row(s, now) {
+  const tr = el("tr");
+
+  const who = el("td", "who");
+  who.appendChild(el("div", "id", s.id));
+  const from = s.source === "fingerprint" ? "identified by its opening messages" : "from the session header";
+  who.appendChild(el("div", "vk", (s.virtual_key ? `key ${s.virtual_key}, ` : "") + from));
+  tr.appendChild(who);
+
+  const st = el("td");
+  st.appendChild(el("div", "state " + (stateClass[s.state] || ""), stateWord[s.state] || s.state));
+  const last = (s.recent || []).at(-1);
+  if (last && s.state !== "ok") {
+    const reason = last.reason.charAt(0).toUpperCase() + last.reason.slice(1) + ".";
+    st.appendChild(el("div", "why", last.would ? `${reason} Dry run: this would have been a ${last.would}.` : reason));
+  }
+  tr.appendChild(st);
+
+  const tape = el("td");
+  tape.appendChild(trail(s.trail));
+  tr.appendChild(tape);
+
+  tr.appendChild(el("td", "num", s.requests.toLocaleString() + (s.blocked ? ` + ${s.blocked} blocked` : "")));
+  tr.appendChild(el("td", "num", s.total_tokens.toLocaleString()));
+  tr.appendChild(el("td", "num", money(s.cost_usd)));
+  tr.appendChild(el("td", "seen", ago(s.last_seen, now)));
+
+  const act = el("td");
+  const armed = confirming.has(s.key);
+  const b = el("button", armed ? "confirm" : "", armed ? "Confirm reset" : "Reset session");
+  b.title = "Forget this session's counters and any limit it has hit";
+  b.addEventListener("click", async () => {
+    if (!confirming.has(s.key)) { confirming.add(s.key); render(); setTimeout(() => { confirming.delete(s.key); render(); }, 4000); return; }
+    confirming.delete(s.key);
+    try { await api("/api/reset", { method: "POST", body: JSON.stringify({ key: s.key }) }); } catch (e) { showProblem(e); }
+    refresh();
+  });
+  act.appendChild(b);
+  tr.appendChild(act);
+  return tr;
+}
+
+function ruleLine(name, on, text) {
+  const li = el("li", on ? "" : "off");
+  li.appendChild(el("span", "", name));
+  li.appendChild(el("span", "", on ? text : "Off."));
+  return li;
+}
+
+function describeRules(c) {
+  const out = [];
+  const act = (a) => ({ warn: "warn", nudge: "tell the model it is repeating itself", block: "block" }[a] || a);
+  const loop = (r, unit) => {
+    let t = `After ${r.threshold} ${unit}, ${act(r.action)}.`;
+    if (r.action !== "block" && r.escalate_after > 0) t += ` Block after ${r.threshold + r.escalate_after}.`;
+    return t;
+  };
+  const L = c.loops, on = (r) => r.enabled !== false;
+  out.push(ruleLine("Same tool call, same result", on(L.repeat_tool_call), loop(L.repeat_tool_call, "in a row")));
+  out.push(ruleLine("Same tool call, any result", on(L.repeat_tool_call_any_result), loop(L.repeat_tool_call_any_result, "in a row")));
+  const cy = L.tool_cycle;
+  let cyText = `When a sequence of up to ${cy.max_period} steps repeats ${cy.repeats} times, ${act(cy.action)}.`;
+  if (cy.action !== "block" && cy.escalate_after > 0) cyText += ` Block after ${cy.repeats + cy.escalate_after}.`;
+  out.push(ruleLine("Repeating sequence of steps", on(cy), cyText));
+  out.push(ruleLine("Same reply from the model", on(L.repeat_output), loop(L.repeat_output, "in a row")));
+  const rr = L.repeat_request;
+  out.push(ruleLine("Unchanged conversation resent", on(rr), `After ${rr.threshold} answered resends within ${span(rr.window)}, ${act(rr.action)}.`));
+
+  const lim = c.limits, caps = [];
+  if (lim.max_requests) caps.push(plural(lim.max_requests, "request", "requests"));
+  if (lim.max_tokens) caps.push(plural(lim.max_tokens, "token", "tokens"));
+  if (lim.max_cost_usd) caps.push(money(lim.max_cost_usd));
+  if (lim.max_duration && lim.max_duration !== "0s") caps.push(span(lim.max_duration));
+  out.push(ruleLine("Limits for one session", caps.length > 0, `${caps.join(", ")}. On reaching one, ${act(lim.action)}.`));
+  out.push(ruleLine("Tools that may repeat", (L.ignore_tools || []).length > 0, (L.ignore_tools || []).join(", ")));
+  out.push(ruleLine("Sessions with no header", c.session.fallback === "fingerprint", "Identified by how the conversation opened."));
+  out.push(ruleLine("Idle sessions", true, `Forgotten after ${span(c.session.idle_ttl)} without requests.`));
+  return out;
+}
+
+let data = null;
+
+function render() {
+  if (!data) return;
+  const { summary, sessions } = data;
+  const now = new Date(summary.now);
+  const t = summary.totals;
+
+  const lede = $("lede");
+  lede.textContent = "";
+  const count = (state) => sessions.filter((s) => s.state === state).length;
+  const blocked = count("blocked"), nudged = count("nudged") + count("warned");
+  if (sessions.length === 0) {
+    lede.textContent = "No sessions are being tracked.";
+  } else {
+    lede.append(plural(sessions.length, "session", "sessions") + " tracked. ");
+    if (blocked) lede.append(Object.assign(el("strong", "trip"), { textContent: `${blocked} blocked` }), nudged ? ", " : ". ");
+    if (nudged) lede.append(Object.assign(el("strong", "amber"), { textContent: `${nudged} warned or nudged` }), ". ");
+    if (!blocked && !nudged) lede.append("All of them are fine.");
+  }
+  const parts = [`${money(t.cost_usd)} spent across ${plural(t.requests, "request", "requests")} since the gateway started`];
+  if (t.blocked) parts.push(`${plural(t.blocked, "request", "requests")} blocked, about ${money(t.cost_avoided_estimate_usd)} not spent`);
+  $("sub").textContent = parts.join("; ") + "." + (t.dry_run ? " Dry run is on: the guard reports what it would do and never interferes." : "");
+
+  const rows = $("rows");
+  rows.textContent = "";
+  $("panel").hidden = false;
+  $("key").hidden = sessions.length === 0;
+  if (sessions.length === 0) {
+    const td = el("td", "empty", "Sessions appear here as soon as an agent sends a request through the gateway. Send an x-bf-session-id header to name a session, or send none and the guard identifies the conversation by how it opened.");
+    td.colSpan = 8;
+    rows.appendChild(el("tr")).appendChild(td);
+  } else {
+    for (const s of sessions) rows.appendChild(row(s, now));
+  }
+
+  const rules = $("rules");
+  rules.textContent = "";
+  for (const li of describeRules(summary.config)) rules.appendChild(li);
+}
+
+function showProblem(e) {
+  if (e && e.needsToken) { $("tokenForm").hidden = false; $("lede").textContent = "This status page needs its token."; return; }
+  const p = $("problem");
+  p.hidden = false;
+  p.textContent = "Could not reach the session guard: " + (e && e.message ? e.message : e) + ". Retrying.";
+}
+
+async function refresh() {
+  try {
+    const [summary, sessions] = await Promise.all([api("/api/summary"), api("/api/sessions")]);
+    data = { summary, sessions };
+    $("problem").hidden = true;
+    $("tokenForm").hidden = true;
+    render();
+  } catch (e) { showProblem(e); }
+}
+
+$("tokenForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  token = $("token").value.trim();
+  try { sessionStorage.setItem("session-guard-token", token); } catch { /* storage unavailable */ }
+  refresh();
+});
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+</script>
+</body>
+</html>

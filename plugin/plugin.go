@@ -71,11 +71,18 @@ func carrierOf(ctx *schemas.BifrostContext) *carrier {
 	return c
 }
 
-// Plugin implements Bifrost's LLM plugin hooks and the response-headers transport hook.
+// Plugin implements Bifrost's LLM plugin and HTTP transport plugin interfaces, so it can be
+// loaded as a shared object, registered in the gateway as a built-in, or passed to Bifrost's
+// Go SDK directly.
 type Plugin struct {
 	engine *guard.Engine
 	status *statusServer
 }
+
+var (
+	_ schemas.LLMPlugin           = (*Plugin)(nil)
+	_ schemas.HTTPTransportPlugin = (*Plugin)(nil)
+)
 
 // New builds the plugin from the "config" value of its entry in Bifrost's config.json.
 func New(config any) (*Plugin, error) {
@@ -124,6 +131,22 @@ func (p *Plugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, _ *schemas.HT
 		ctx.SetValue(ctxKeyCarrier, &carrier{})
 	}
 	return nil, nil
+}
+
+// HTTPTransportPreAuthHook is a no-op: the guard needs the caller to be authenticated first.
+func (p *Plugin) HTTPTransportPreAuthHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
+	return nil, nil
+}
+
+// HTTPTransportPostHook is a no-op: the decision is reported by the response headers hook,
+// which also covers streamed responses.
+func (p *Plugin) HTTPTransportPostHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest, _ *schemas.HTTPResponse) error {
+	return nil
+}
+
+// HTTPTransportStreamChunkHook passes every chunk through unchanged.
+func (p *Plugin) HTTPTransportStreamChunkHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest, chunk *schemas.BifrostStreamChunk) (*schemas.BifrostStreamChunk, error) {
+	return chunk, nil
 }
 
 // PreRequestHook is a no-op: the guard does not take part in routing.

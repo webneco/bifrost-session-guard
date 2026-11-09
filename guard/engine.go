@@ -87,7 +87,10 @@ type Snapshot struct {
 	TokensAvoided int64 `json:"tokens_avoided_estimate"`
 	// CostAvoided estimates the spend avoided by blocked requests, from the session's average cost per request.
 	CostAvoided float64 `json:"cost_avoided_estimate_usd"`
-	Recent      []Event `json:"recent,omitempty"`
+	// Trail is the outcome of the session's latest requests, oldest first, one letter each:
+	// a (allowed), w (warned), n (nudged), b (blocked).
+	Trail  string  `json:"trail"`
+	Recent []Event `json:"recent,omitempty"`
 }
 
 // Totals summarises the engine since start.
@@ -104,7 +107,10 @@ type Totals struct {
 	DryRun        bool    `json:"dry_run"`
 }
 
-const recentEvents = 20
+const (
+	recentEvents = 20
+	trailLength  = 48
+)
 
 type session struct {
 	Snapshot
@@ -341,6 +347,10 @@ func (e *Engine) Evaluate(r Request) Decision {
 	if d.Action != ActionBlock {
 		s.Requests++
 		e.totals.Requests++
+	}
+	s.Trail += string(d.Action[0])
+	if len(s.Trail) > trailLength {
+		s.Trail = s.Trail[len(s.Trail)-trailLength:]
 	}
 	if d.Action != ActionAllow {
 		ev := Event{At: now, Action: d.Action, Rule: d.Rule, Reason: d.Reason, Would: d.Would}

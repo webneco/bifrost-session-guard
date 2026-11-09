@@ -1,0 +1,6 @@
+.git
+.work
+build
+demo/data
+node_modules
+*.so
