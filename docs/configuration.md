@@ -56,6 +56,8 @@ The values above are the defaults. An invalid configuration stops the plugin fro
 | `fallback` | `"fingerprint"` | For a request with no session id: `"fingerprint"` derives one from the system prompt and first user message; `"none"` leaves the request unguarded. |
 | `scope_by_virtual_key` | `true` | Keeps the same session id under two virtual keys apart. |
 
+With `"fingerprint"`, requests that open identically share a session. That is what makes an agent's turns one session. It also means a service that sends the same system prompt and first message for every call is counted as one session by `limits`. Use `"none"` if you set limits and have traffic like that.
+
 Bifrost resolves the session id before the plugin runs. `x-bf-session-id` wins. Otherwise it uses the header a coding agent sends by itself: `x-claude-code-session-id`, `x-session-affinity`, `x-session-id`, `session-id`, `session_id`, `thread-id` or `conversation_id`.
 
 ## `limits`
@@ -116,7 +118,7 @@ The model giving the same text reply several times in a row, with or without an 
 
 ### `repeat_request`
 
-A client sending an unchanged conversation again after it was answered. Only answered requests count, so a client retrying after a provider error is not treated as looping.
+A client sending an unchanged agent conversation again after it was answered. Only answered requests count, so a client retrying after a provider error is not treated as looping. Only conversations that contain tool calls count, so a service that sends one fixed prompt many times is left alone.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

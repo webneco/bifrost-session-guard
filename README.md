@@ -98,7 +98,7 @@ The Docker command leaves the guarded gateway running, as does `demo/run.sh --ke
 | Real operator problem, solved end to end | One stuck session can drain a shared budget and lock out a team. The guard detects it, intervenes, reports it and lets an operator reset it. |
 | Public extension points | A standard Bifrost plugin. It uses `PreLLMHook`, `PostLLMHook` and the HTTP transport hooks, and nothing private. It imports only Bifrost's `core/schemas` package. |
 | Reproducible integration with clear setup | One command builds a plugin-capable gateway from Bifrost's own source at a pinned release (v2.5.0), builds the plugin and checks the two against each other. `make demo` and `make e2e` then run against that gateway. See the note on builds below. |
-| Tests, documentation, ready for an upstream pull request | 50 unit tests, 13 end-to-end tests against the real gateway, benchmarks, this README, a [configuration reference](docs/configuration.md) and an [upstream plan](docs/upstream.md). A 20-line patch registers the guard as a built-in; with it, the same 13 tests pass on a statically linked gateway. |
+| Tests, documentation, ready for an upstream pull request | 51 unit tests, 13 end-to-end tests against the real gateway, benchmarks, this README, a [configuration reference](docs/configuration.md) and an [upstream plan](docs/upstream.md). A 20-line patch registers the guard as a built-in; with it, the same 13 tests pass on a statically linked gateway. |
 
 **A note on builds.** The gateway binary Bifrost publishes is statically linked and cannot load any custom plugin. Bifrost's documentation asks plugin users to build the gateway with dynamic linking, and that is what `make gateway` and the Dockerfile do, from unmodified Bifrost source. Go also refuses to load a plugin unless every package it shares with the gateway is the same version. `scripts/build-plugin.sh` compares the two binaries and names any package that differs, so that mistake fails at build time with a clear message.
 
@@ -214,7 +214,7 @@ Set `status.listen` to turn them on. They run on their own listener, so they wor
 ## Tests
 
 ```bash
-make test          # 50 unit tests with the race detector, no gateway needed
+make test          # 51 unit tests with the race detector, no gateway needed
 make e2e           # 13 tests against the real gateway with the plugin loaded
 make e2e-builtin   # the same 13 tests with the guard compiled into the gateway
 make bench
@@ -228,6 +228,7 @@ Measured on a 2-vCPU cloud VM (Xeon, 2.1 GHz): the pre-hook takes about 50 micro
 
 - **The nudge is untested on real models.** Every run so far used the scripted mock, which is written to change course when it reads the notice. How often a real model does has not been measured. The block does not depend on it.
 - **Counters live in memory, per gateway process.** Loop detection is stateless and works across replicas. Session limits and the status page see only the requests that reached that replica, so exact per-session limits across replicas need sticky routing at the load balancer. A restart clears the counters.
+- **Fingerprint sessions group identical openings.** Without a session header, requests with the same system prompt and first user message count as one session. Loop detection is unaffected, because it reads each request's own history. Session limits would add such requests together, so set `session.fallback` to `"none"` if you use limits and have a service that sends one fixed prompt.
 - **Results that differ only by noise.** A tool result with a timestamp or request id in it is a different result each time. A second, looser rule catches the same call repeating ten times whatever it returns.
 - **Stateful Responses API.** A client that sends `previous_response_id` instead of its history gives the guard nothing to read, so only session limits apply.
 - **Nested key order.** Arguments that differ only in the order of keys inside a nested object count as different calls.

@@ -276,8 +276,9 @@ func (e *Engine) Evaluate(r Request) Decision {
 
 	// 2. Loops visible in the conversation itself. This needs no stored state: the
 	// conversation carries its own history, so the same verdict is reached on any replica.
+	els := elements(r.Conv.Items)
 	if d.Action != ActionBlock {
-		if f := detectLoops(elements(r.Conv.Items), e.cfg.Loops); f != nil && rank(f.Action) > rank(d.Action) {
+		if f := detectLoops(els, e.cfg.Loops); f != nil && rank(f.Action) > rank(d.Action) {
 			d = Decision{Action: f.Action, Kind: "loop", Rule: f.Rule, Reason: f.Reason(), Count: f.Count, Threshold: f.Threshold}
 			if f.Action == ActionNudge {
 				d.NudgeText = f.NudgeText(e.cfg.Nudge.Suffix)
@@ -285,7 +286,16 @@ func (e *Engine) Evaluate(r Request) Decision {
 		}
 	}
 
-	// 3. The same conversation sent again after it was already answered.
+	// 3. The same agent conversation sent again after it was already answered. Only
+	// conversations with tool activity count: a service that sends one fixed prompt many
+	// times is doing its job, not looping.
+	agentic := false
+	for i := range els {
+		if els[i].kind == elemStep {
+			agentic = true
+			break
+		}
+	}
 	sig := convSig(r.Conv)
 	rr := e.cfg.Loops.RepeatRequest
 	switch {
@@ -299,7 +309,7 @@ func (e *Engine) Evaluate(r Request) Decision {
 	}
 	s.lastConvSig = sig
 	s.lastConvOK = false
-	if on(rr.Enabled) && s.sameConvCount >= rr.Threshold && rank(rr.Action) > rank(d.Action) {
+	if on(rr.Enabled) && agentic && s.sameConvCount >= rr.Threshold && rank(rr.Action) > rank(d.Action) {
 		d = Decision{
 			Action: rr.Action, Kind: "loop", Rule: RuleRepeatRequest,
 			Reason: fmt.Sprintf("the same unchanged conversation was sent %d times", s.sameConvCount),

@@ -449,6 +449,18 @@ func TestRepeatRequestCountsOnlyAnsweredResends(t *testing.T) {
 	}
 }
 
+func TestAFixedPromptSentManyTimesIsNotALoop(t *testing.T) {
+	e := testEngine(t, func(c *Config) { c.Loops.RepeatRequest.Threshold = 3 })
+	// A classifier or a health probe: the same single prompt, answered every time.
+	c := (&conv{}).user("Reply with the word ok.").build()
+	for i := 1; i <= 50; i++ {
+		if d := e.Evaluate(req(fmt.Sprintf("p%d", i), c)); d.Action != ActionAllow {
+			t.Fatalf("request %d: a repeated plain prompt must pass, got %+v", i, d)
+		}
+		e.Record("s1", Usage{OK: true})
+	}
+}
+
 func TestDryRunNeverBlocksOrNudges(t *testing.T) {
 	e := testEngine(t, func(c *Config) { c.DryRun = true })
 	c := newConv()
