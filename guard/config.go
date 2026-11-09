@@ -168,6 +168,9 @@ type NudgeConfig struct {
 type StatusConfig struct {
 	// Listen is an address such as "127.0.0.1:9797". Empty leaves the status server off.
 	Listen string `json:"listen"`
+	// Token, when set, must be sent as "Authorization: Bearer <token>" on every API call.
+	// Set it whenever Listen is not a loopback address.
+	Token string `json:"token"`
 }
 
 // itemsPerStep is the number of conversation items one agent step usually takes: optional
