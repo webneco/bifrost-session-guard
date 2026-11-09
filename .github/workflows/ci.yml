@@ -49,3 +49,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t bifrost-session-guard .
       - run: docker run --rm bifrost-session-guard e2e
+      - run: docker run --rm bifrost-session-guard demo-once

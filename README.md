@@ -22,29 +22,31 @@ Bifrost already knows which session a request belongs to. It reads `x-bf-session
 It watches each session on its own and steps in for that session only.
 
 - **Finds loops.** The same tool call returning the same result, a sequence of steps going round in circles, the model giving the same reply, or a client resending an unchanged conversation.
-- **Tells the model first.** At the first sign of a loop it adds a short notice to the system prompt, saying what is repeating and that repeating it will not help. Many loops end there.
-- **Blocks if that fails.** If the loop continues, the session gets an error its client will not retry. Other sessions on the same key carry on.
+- **Tells the model first.** At the first sign of a loop it adds a short notice to the system prompt, saying what is repeating and that repeating it will not help. That gives the model a chance to change course by itself.
+- **Blocks if that fails.** If the loop continues, the session gets an error that client libraries do not retry by default. Other sessions on the same key carry on.
 - **Caps a session.** Optional limits on requests, tokens, cost and duration for one session.
 - **Shows what it did.** Response headers on every request, a line in Bifrost's own request log, and a small status page.
 
 No client changes are needed. Sessions come from the headers Bifrost already understands. When a request has none, the guard identifies the conversation by how it opened.
 
-## See it in two minutes
+## Run the demo
 
-The demo needs no API keys. A scripted mock stands in for the model provider, so nothing is sent anywhere and nothing is spent. Prices are the real catalog prices for `gpt-4o-mini`.
+The demo needs no API keys. A scripted mock stands in for the model provider, so no request reaches a real model and nothing is spent. Prices are the catalog prices for `gpt-4o-mini`, which the gateway downloads when it starts.
 
-With Docker:
+With Docker, on any system:
 
 ```bash
 docker build -t bifrost-session-guard .
 docker run --rm -it -p 8080:8080 -p 9797:9797 bifrost-session-guard
 ```
 
-Or on Linux or macOS with Go 1.21+, Node 20+, git and a C compiler:
+Or directly on Linux or macOS, with Go 1.21+, Node 20+, git and a C compiler:
 
 ```bash
 make demo
 ```
+
+On Windows use Docker or WSL, because Go plugins are not supported there. The first build compiles the gateway from source and takes about five minutes on a clean machine (about nine with Docker). After that the demo runs in about 20 seconds.
 
 The demo runs the same two agents twice on one virtual key with a $0.06 daily budget. Agent A is stuck re-reading a missing file. Agent B does normal work.
 
@@ -87,7 +89,7 @@ agent-c   nudged    5         0        1       91246     $0.0140
 
 Agent C is a third agent that stops by itself as soon as it reads the notice. The stuck agent cost $0.0196 where it had cost $0.0625, and the key stayed usable.
 
-The demo leaves the gateway running. The status page is at http://127.0.0.1:9797 and Bifrost's own dashboard at http://127.0.0.1:8080.
+The Docker command leaves the guarded gateway running, as does `demo/run.sh --keep`. The status page is at http://127.0.0.1:9797 and Bifrost's own dashboard at http://127.0.0.1:8080.
 
 ## How it meets the brief
 
@@ -130,7 +132,7 @@ Add the plugin to Bifrost's `config.json`:
 
 Every setting has a default, so `"config": {}` works. To try it safely on live traffic, start with `"dry_run": true`: the guard reports what it would do and never interferes.
 
-To move to another Bifrost release, run `scripts/sync-deps.sh v2.x.y` and rebuild.
+To move to another Bifrost release, run `scripts/sync-deps.sh v2.x.y` and rebuild. Everything here was tested end to end on v2.5.0. The plugin also compiles and passes its unit tests against v2.4.0.
 
 ## Configuration
 
@@ -224,6 +226,7 @@ Measured on a 2-vCPU cloud VM (Xeon, 2.1 GHz): the pre-hook takes about 50 micro
 
 ## Limits
 
+- **The nudge is untested on real models.** Every run so far used the scripted mock, which is written to change course when it reads the notice. How often a real model does has not been measured. The block does not depend on it.
 - **Counters live in memory, per gateway process.** Loop detection is stateless and works across replicas. Session limits and the status page see only the requests that reached that replica, so exact per-session limits across replicas need sticky routing at the load balancer. A restart clears the counters.
 - **Results that differ only by noise.** A tool result with a timestamp or request id in it is a different result each time. A second, looser rule catches the same call repeating ten times whatever it returns.
 - **Stateful Responses API.** A client that sends `previous_response_id` instead of its history gives the guard nothing to read, so only session limits apply.

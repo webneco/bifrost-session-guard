@@ -25,17 +25,27 @@ GOVER="$(awk '$1=="go"{print $2}' "$TMP/go.mod" | head -1)"
 
 echo "Bifrost $VERSION: go $GOVER, core $CORE"
 export GOWORK=off GOFLAGS=-mod=mod
-go mod edit -go="$GOVER"
-go mod edit -require="github.com/maximhq/bifrost/core@$CORE"
-go get "github.com/maximhq/bifrost/transports/v2@$VERSION" >/dev/null
 
-# Drop our existing replace directives, then copy the release's.
-for old in $(go mod edit -json | python3 -c 'import json,sys; [print(r["Old"]["Path"]) for r in (json.load(sys.stdin).get("Replace") or [])]'); do
-  go mod edit -dropreplace="$old"
-done
-grep '=>' "$TMP/go.mod" | sed 's/^replace[[:space:]]*//; s/^[[:space:]]*//' | while read -r old _arrow new newver; do
+# Start from an empty requirement list. Leftover pins from another release would otherwise
+# hold shared packages at newer versions than this release uses.
+MODULE="$(go list -m)"
+cat > go.mod <<MOD
+module $MODULE
+
+go $GOVER
+
+require github.com/maximhq/bifrost/core $CORE
+MOD
+rm -f go.sum
+go get "github.com/maximhq/bifrost/transports/v2@$VERSION" >/dev/null 2>&1
+
+# Copy the release's replace directives.
+{ grep '=>' "$TMP/go.mod" || true; } | sed 's/^replace[[:space:]]*//; s/^[[:space:]]*//' | while read -r old _arrow new newver; do
   go mod edit -replace="$old=$new@$newver"
 done
-go mod download >/dev/null
+go mod download >/dev/null 2>&1
+go build ./... # completes go.sum for this module's own packages
+go vet ./... >/dev/null
+
 echo "$VERSION" > BIFROST_VERSION
-echo "go.mod now matches Bifrost $VERSION"
+echo "go.mod now matches Bifrost $VERSION. Rebuild the gateway and the plugin for this version."
