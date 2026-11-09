@@ -1,0 +1,63 @@
+diff --git a/transports/bifrost-http/lib/config.go b/transports/bifrost-http/lib/config.go
+index 99500a0..a62d05f 100644
+--- a/transports/bifrost-http/lib/config.go
++++ b/transports/bifrost-http/lib/config.go
+@@ -59,6 +59,7 @@ import (
+ 	"github.com/maximhq/bifrost/plugins/routing/rules"
+ 	"github.com/maximhq/bifrost/plugins/semanticcache"
+ 	"github.com/maximhq/bifrost/plugins/telemetry"
++	sessionguard "github.com/webneco/bifrost-session-guard/plugin"
+ 	"gorm.io/gorm"
+ )
+ 
+@@ -150,6 +151,7 @@ var builtinPluginNames = []string{
+ 	compat.PluginName,
+ 	maxim.PluginName,
+ 	routing.PluginName,
++	sessionguard.PluginName,
+ }
+ 
+ func GetBuiltinPluginNames() []string {
+diff --git a/transports/bifrost-http/server/plugins.go b/transports/bifrost-http/server/plugins.go
+index 408705c..6af59ee 100644
+--- a/transports/bifrost-http/server/plugins.go
++++ b/transports/bifrost-http/server/plugins.go
+@@ -19,6 +19,7 @@ import (
+ 	"github.com/maximhq/bifrost/plugins/telemetry"
+ 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/handlers"
+ 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
++	sessionguard "github.com/webneco/bifrost-session-guard/plugin"
+ )
+ 
+ // InferPluginTypes determines which interface types a plugin implements
+@@ -203,6 +204,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
+ 	case modelcatalogresolver.PluginName:
+ 		return modelcatalogresolver.Init(bifrostConfig.ModelCatalog, logger)
+ 
++	case sessionguard.PluginName:
++		guard, err := sessionguard.New(pluginConfig)
++		if err != nil {
++			return nil, err
++		}
++		return guard, nil
++
+ 	default:
+ 		return nil, fmt.Errorf("unknown built-in plugin: %s", name)
+ 	}
+@@ -357,6 +365,16 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
+ 	}
+ 	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(9))
+ 
++	// Session guard (if configured in PluginConfigs). It runs after governance, so the caller's
++	// virtual key is already resolved, and after the semantic cache, so cache hits cost it nothing.
++	sessionGuardConfig := s.getPluginConfig(sessionguard.PluginName)
++	if sessionGuardConfig != nil && sessionGuardConfig.Enabled {
++		s.registerPluginWithStatus(ctx, sessionguard.PluginName, nil, sessionGuardConfig.Config, false)
++	} else {
++		s.markPluginDisabled(sessionguard.PluginName)
++	}
++	s.Config.SetPluginOrderInfo(sessionguard.PluginName, builtinPlacement, schemas.Ptr(11))
++
+ 	// 10. ModelCatalogResolver (last routing layer — fills req.Provider from catalog only when
+ 	// no earlier routing plugin (governance routing rules, governance VK LB, enterprise LB)
+ 	// already set one. CEL rules can still match on provider == "" because this runs last.

@@ -4,10 +4,11 @@
 #   make all       build the plugin-capable gateway and the plugin
 #   make e2e       end-to-end tests against the real gateway
 #   make demo      the before/after demo, no API keys needed
+#   make e2e-builtin   the same end-to-end tests against a gateway with the guard compiled in
 
 export GOWORK := off
 
-.PHONY: all gateway plugin test bench e2e demo sync clean
+.PHONY: all gateway plugin gateway-builtin test bench e2e e2e-builtin demo sync clean
 
 all: gateway plugin
 
@@ -25,6 +26,12 @@ bench: ## Cost of one decision
 
 e2e: gateway plugin ## End-to-end tests: real gateway, mock provider, scripted agents
 	node --test --test-concurrency=1 test/e2e.test.mjs
+
+gateway-builtin: ## Build a gateway with the session guard compiled in (.work/bin/bifrost-http-builtin)
+	@scripts/build-builtin-gateway.sh
+
+e2e-builtin: gateway-builtin ## End-to-end tests against the gateway with the guard compiled in
+	GATEWAY=$(CURDIR)/.work/bin/bifrost-http-builtin PLUGIN_SO=builtin node --test --test-concurrency=1 test/e2e.test.mjs
 
 demo: gateway plugin ## Before/after demo with a looping agent
 	@demo/run.sh

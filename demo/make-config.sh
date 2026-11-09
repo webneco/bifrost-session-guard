@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Writes a Bifrost config.json for the demo into an app directory.
 #
-#   demo/make-config.sh <app-dir> <on|off|dry-run> [plugin.so]
+#   demo/make-config.sh <app-dir> <on|off|dry-run> [plugin.so | builtin]
 #
 # Environment: MOCK_URL, STATUS_ADDR, BUDGET_USD, GUARD_CONFIG (JSON for the plugin's config).
 #
@@ -30,12 +30,17 @@ if [ "$MODE" != "off" ]; then
   else
     CONFIG="{ \"dry_run\": $DRY, \"status\": { \"listen\": \"$STATUS_ADDR\" } }"
   fi
+  # "builtin" is for a gateway that has the session guard compiled in (see docs/upstream.md).
+  PATH_LINE=""
+  if [ "$PLUGIN_SO" != "builtin" ]; then
+    PATH_LINE="
+      \"path\": \"$PLUGIN_SO\","
+  fi
   PLUGINS=$(cat <<JSON
 [
     {
       "name": "session-guard",
-      "enabled": true,
-      "path": "$PLUGIN_SO",
+      "enabled": true,$PATH_LINE
       "config": $CONFIG
     }
   ]

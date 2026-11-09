@@ -21,8 +21,9 @@ const BASE = `http://127.0.0.1:${GW_PORT}`;
 const STATUS = `http://127.0.0.1:${STATUS_PORT}`;
 const VK = "sk-bf-demo-team";
 
+// PLUGIN_SO=builtin tests a gateway that has the session guard compiled in.
 for (const [what, path] of [["gateway", GATEWAY], ["plugin", PLUGIN]]) {
-  if (!existsSync(path)) {
+  if (path !== "builtin" && !existsSync(path)) {
     console.error(`missing ${what} at ${path}. Run: make gateway plugin`);
     process.exit(1);
   }

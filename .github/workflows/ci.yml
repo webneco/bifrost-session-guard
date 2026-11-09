@@ -39,6 +39,8 @@ jobs:
           key: gateway-${{ runner.os }}-${{ hashFiles('BIFROST_VERSION', 'scripts/build-gateway.sh') }}
       - run: make e2e
       - run: make demo
+      - name: the same tests with the guard compiled into a statically linked gateway
+        run: STATIC=1 make e2e-builtin
 
   docker:
     name: docker image
