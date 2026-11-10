@@ -175,6 +175,80 @@ describe("guard on, default configuration", () => {
     assert.equal(r.guard, "allow");
   });
 
+  // The loops found by running real models (see study/): nothing in them repeats back to back.
+  const PUSH = "Continue. The task is not finished yet.";
+  const agentConversation = () => {
+    const messages = [
+      { role: "system", content: "You are an operations agent.\ndemo-scenario: stubborn" },
+      { role: "user", content: "Wait for deployment job 42 to finish, then report whether it succeeded." },
+    ];
+    let n = 0;
+    return {
+      messages,
+      step(name, args, result) {
+        n++;
+        messages.push({ role: "assistant", content: null, tool_calls: [{ id: "s" + n, type: "function", function: { name, arguments: JSON.stringify(args) } }] });
+        messages.push({ role: "tool", tool_call_id: "s" + n, content: result });
+        return this;
+      },
+      stopAndGetPushed(text) {
+        messages.push({ role: "assistant", content: text }, { role: "user", content: PUSH });
+        return this;
+      },
+      body() {
+        return { model: "openai/gpt-4o-mini", messages };
+      },
+    };
+  };
+
+  test("a loop that runs through a harness saying \"continue\" is nudged, then blocked", async () => {
+    const h = { "x-bf-session-id": "e2e-harness" };
+    const c = agentConversation();
+    const poll = () => c.step("check_job", { job_id: "42" }, '{"job_id":"42","status":"running"}');
+    for (let i = 1; i <= 2; i++) poll().stopAndGetPushed(`Still running after check ${i}. I will stop here.`);
+    assert.equal((await post("/v1/chat/completions", c.body(), h)).guard, "allow");
+
+    poll().stopAndGetPushed("Check 3 says the same.");
+    let r = await post("/v1/chat/completions", c.body(), h);
+    assert.equal(r.status, 200);
+    assert.equal(r.guard, "nudge");
+    assert.equal(r.rule, "no_progress");
+
+    poll().stopAndGetPushed("Check 4. Nothing has changed.");
+    poll();
+    r = await post("/v1/chat/completions", c.body(), h);
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error.type, "session_guard_loop_detected");
+    assert.equal(r.body.error.code, "no_progress");
+    assert.match(r.body.error.message, /check_job/);
+
+    // A person saying something new starts again.
+    c.messages.push({ role: "user", content: "Job 42 was cancelled. Check job 43 instead." });
+    assert.equal((await post("/v1/chat/completions", c.body(), h)).guard, "allow");
+  });
+
+  test("an edit that leaves the same failure in place is not progress, and a new result is", async () => {
+    const h = { "x-bf-session-id": "e2e-fix-loop" };
+    const fail = "FAIL: TestParse: expected 3 items, got 4 (1 of 12 tests failed)";
+    const c = agentConversation().step("run_tests", {}, fail);
+    for (let i = 1; i <= 5; i++) c.step("edit_file", { path: "parser.go", content: "attempt " + i }, "ok").step("run_tests", {}, fail);
+    let r = await post("/v1/chat/completions", c.body(), h);
+    assert.equal(r.guard, "nudge");
+    assert.equal(r.rule, "no_progress");
+    c.step("edit_file", { path: "parser.go", content: "attempt 6" }, "ok").step("run_tests", {}, "ok: 12 of 12 tests passed");
+    assert.equal((await post("/v1/chat/completions", c.body(), h)).guard, "allow");
+  });
+
+  test("failed attempts alone are reported, and the model is neither told nor blocked", async () => {
+    const h = { "x-bf-session-id": "e2e-guesses" };
+    const c = agentConversation();
+    for (let i = 1; i <= 20; i++) c.step("read_file", { path: `guess${i}.yaml` }, `error: guess${i}.yaml: no such file or directory`);
+    const r = await post("/v1/chat/completions", c.body(), h);
+    assert.equal(r.status, 200);
+    assert.equal(r.guard, "warn");
+    assert.equal(r.rule, "repeat_failure");
+  });
+
   test("Responses API requests are guarded", async () => {
     const input = [{ type: "message", role: "user", content: "Read the project configuration and summarise it." }];
     for (let i = 1; i <= 4; i++) {

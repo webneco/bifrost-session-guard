@@ -92,7 +92,8 @@ func chatConversation(r *schemas.BifrostChatRequest, window int) guard.Conversat
 		case schemas.ChatMessageRoleUser:
 			items = append(items, guard.Item{Kind: guard.KindUser, Sig: guard.SigString(chatText(m.Content))})
 		case schemas.ChatMessageRoleTool:
-			it := guard.Item{Kind: guard.KindToolResult, Sig: guard.SigString(chatText(m.Content))}
+			out := chatText(m.Content)
+			it := guard.Item{Kind: guard.KindToolResult, Sig: guard.SigString(out), Head: guard.Head(out)}
 			if m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil {
 				it.CallID = *m.ChatToolMessage.ToolCallID
 			}
@@ -230,6 +231,7 @@ func responsesConversation(r *schemas.BifrostResponsesRequest, window int) guard
 			it := guard.Item{Kind: guard.KindToolResult, CallID: callID}
 			if tm := m.ResponsesToolMessage; tm != nil && tm.Output != nil && tm.Output.ResponsesToolCallOutputStr != nil {
 				it.Sig = guard.SigString(*tm.Output.ResponsesToolCallOutputStr)
+				it.Head = guard.Head(*tm.Output.ResponsesToolCallOutputStr)
 			} else {
 				it.Sig = responsesItemSig(m)
 			}

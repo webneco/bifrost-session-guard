@@ -20,6 +20,8 @@ The session guard reads its settings from the `config` object of its entry in Bi
           "tool_cycle": { "enabled": true, "max_period": 6, "repeats": 3, "action": "nudge", "escalate_after": 2 },
           "repeat_output": { "enabled": true, "threshold": 4, "action": "nudge", "escalate_after": 3 },
           "repeat_request": { "enabled": true, "threshold": 8, "window": "2m", "action": "block" },
+          "no_progress": { "enabled": true, "threshold": 5, "action": "nudge", "escalate_after": 3 },
+          "repeat_failure": { "enabled": true, "threshold": 8, "action": "nudge", "escalate_after": 0 },
           "ignore_tools": []
         },
         "block": { "loop_status_code": 403, "limit_status_code": 402 },
@@ -81,6 +83,8 @@ A session that has hit a limit stays refused until it is reset through the statu
 | `window` | `160` | How many trailing conversation items are examined. One agent step is usually three items: assistant text, a tool call and its result. |
 | `ignore_tools` | `[]` | Tool names that may repeat freely, for polling or waiting tools. |
 
+The first four rules look for something repeating back to back at the end of the conversation. `no_progress` and `repeat_failure` look further back, for loops in which nothing repeats back to back: the agent rewords its messages, tries a new variation each time, or is told to continue by the program driving it. They were added after running real models through the gateway; see [study/](../study/README.md).
+
 ### `repeat_tool_call`
 
 The same tool call returning the same result, several times in a row.
@@ -127,6 +131,45 @@ A client sending an unchanged agent conversation again after it was answered. On
 | `window` | `"2m"` | The resends must fall within this time. |
 | `action` | `"block"` | `"block"` or `"warn"`. |
 
+### `no_progress`
+
+Several turns in a row in which nothing new happened.
+
+A turn makes progress when at least one of its tool calls is new (that call has not returned that result before) and did not fail. Two kinds of turn are counted as being without progress. Both are read from the structure of the conversation, not from its wording:
+
+- **The turn's calls only returned what the same calls had already returned.** They need not be back to back: other calls, and the model's own messages, may sit between them.
+- **The model ended its turn, and the reply was answered with a message the caller had already sent, word for word.** This is an unattended harness that answers every "I am done" or "I am stuck" with the same "continue". The model is not looping here; the program driving it is.
+
+Three more things the rule knows:
+
+- **An edit that leaves the same failure in place is not progress.** When a call fails with exactly the result it failed with the last time it was made, whatever was done in between did not fix it. Edit, run the tests, same failure, edit again: every edit is new and "works", and the rule still counts each round. A failure that changes from run to run (fewer failing tests each time) is left alone.
+- **A new call that fails is not counted, and does not reset the count.** See `repeat_failure` below for why.
+- **A message from a person starts again.** The count only runs back to the last user message that says something new. A user message that repeats an earlier one word for word is treated as automated and resets nothing.
+
+A conversation with no tool calls at all is never counted: a person asking a chat model to "continue" a long answer is not a stalled agent. A call to a tool in `ignore_tools` counts as progress. Calls made together in one turn count as one turn.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | |
+| `threshold` | `5` | Turns in a row without progress that trigger the rule. |
+| `action` | `"nudge"` | `"warn"`, `"nudge"` or `"block"`. |
+| `escalate_after` | `3` | Block once the count reaches `threshold + escalate_after`. `0` never escalates. |
+
+With the defaults, the model is told after five turns in which nothing new happened, and the session is blocked after eight.
+
+### `repeat_failure`
+
+One tool tried in a new way and failing, turn after turn: guessing one file name after another. A turn in which the tool succeeds ends the count. Calls made in the same turn count once. Only calls that had not been made before count, so the same test command failing differently on every run is not this rule's business.
+
+Same settings as `repeat_tool_call`; defaults are `threshold` 8, `action` `"warn"`, `escalate_after` 0.
+
+**By default this rule only reports.** The finding appears in the response headers, the request log and the status page; the model is not told and nothing is blocked. There are two reasons:
+
+- The guard reads failure from the text of the tool result, because the OpenAI formats carry no failure flag. A result counts as a failure when it opens with a word such as `error`, `failed`, `fatal` or `traceback`, when its first 160 characters contain a phrase such as `no such file or directory` or `command not found`, or when it is a JSON object whose first key is a non-empty `error`. That can be wrong.
+- A string of failed attempts is also what honest exploration looks like. When an earlier version of the guard sent the model a notice on this evidence, a real model gave up on a task it could have finished ([study](../study/README.md)).
+
+Set `action` to `"nudge"` to tell the model, and `escalate_after` to block.
+
 ## `block`
 
 | Setting | Default | Meaning |
@@ -140,7 +183,7 @@ A client sending an unchanged agent conversation again after it was answered. On
 | --- | --- | --- |
 | `suffix` | `""` | Text added to the end of the notice, for a house instruction such as "Ask the user before retrying." |
 
-The notice starts with `[Bifrost session guard]`, names what is repeating and how many times, and ends with "Do not repeat it. Try a different approach, or stop and tell the user what is blocking you."
+The notice starts with `[Bifrost session guard]`, names what is repeating and how many times, and ends with "Try a different approach, or stop and tell the user what is blocking you."
 
 ## `status`
 
@@ -167,6 +210,22 @@ Block at once, with no notice first:
 
 ```json
 { "loops": { "repeat_tool_call": { "threshold": 5, "action": "block" } } }
+```
+
+Let a scheduler that sends the same "check again" message poll for as long as it likes:
+
+```json
+{ "loops": { "ignore_tools": ["check_job"] } }
+```
+
+Stop a harness-driven loop sooner, or never block on it:
+
+```json
+{ "loops": { "no_progress": { "threshold": 4, "escalate_after": 2 } } }
+```
+
+```json
+{ "loops": { "no_progress": { "escalate_after": 0 } } }
 ```
 
 Guard only requests that carry a session header:

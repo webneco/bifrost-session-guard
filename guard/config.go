@@ -110,6 +110,15 @@ type LoopsConfig struct {
 	ToolCycle CycleRule `json:"tool_cycle"`
 	// RepeatOutput fires when the model gives the same text reply several times in a row.
 	RepeatOutput LoopRule `json:"repeat_output"`
+	// NoProgress fires when several turns in a row pass without anything new: calls that
+	// return what they returned before, and replies that end the turn only to be answered with
+	// the same message again. It sees loops that run through an unattended harness saying
+	// "continue", and fix attempts that leave the same failure in place.
+	NoProgress LoopRule `json:"no_progress"`
+	// RepeatFailure fires when one tool has been tried in a new way and failed in several
+	// turns in a row: guessing one file name after another. By default it only reports, and
+	// neither tells the model nor blocks, because the guard reads failure from free text.
+	RepeatFailure LoopRule `json:"repeat_failure"`
 	// RepeatRequest fires when a client resends an unchanged conversation after getting an answer.
 	RepeatRequest RepeatRequestRule `json:"repeat_request"`
 	// IgnoreTools lists tool names that may repeat freely, such as polling or wait tools.
@@ -197,6 +206,8 @@ func DefaultConfig() Config {
 			RepeatToolCallAnyResult: LoopRule{Enabled: boolPtr(true), Threshold: 10, Action: ActionNudge, EscalateAfter: 0},
 			ToolCycle:               CycleRule{Enabled: boolPtr(true), MaxPeriod: 6, Repeats: 3, Action: ActionNudge, EscalateAfter: 2},
 			RepeatOutput:            LoopRule{Enabled: boolPtr(true), Threshold: 4, Action: ActionNudge, EscalateAfter: 3},
+			NoProgress:              LoopRule{Enabled: boolPtr(true), Threshold: 5, Action: ActionNudge, EscalateAfter: 3},
+			RepeatFailure:           LoopRule{Enabled: boolPtr(true), Threshold: 8, Action: ActionWarn, EscalateAfter: 0},
 			RepeatRequest:           RepeatRequestRule{Enabled: boolPtr(true), Threshold: 8, Window: Duration(2 * time.Minute), Action: ActionBlock},
 		},
 		Block: BlockConfig{LoopStatusCode: 403, LimitStatusCode: 402},
@@ -267,6 +278,8 @@ func (c *Config) Validate() error {
 		{"repeat_tool_call", c.Loops.RepeatToolCall},
 		{"repeat_tool_call_any_result", c.Loops.RepeatToolCallAnyResult},
 		{"repeat_output", c.Loops.RepeatOutput},
+		{"no_progress", c.Loops.NoProgress},
+		{"repeat_failure", c.Loops.RepeatFailure},
 	}
 	for _, x := range rules {
 		if !on(x.r.Enabled) {

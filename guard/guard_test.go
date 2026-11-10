@@ -30,8 +30,23 @@ func (c *conv) step(tool, args, result string) *conv {
 	id := fmt.Sprintf("call_%d", c.n)
 	c.items = append(c.items,
 		Item{Kind: KindToolCall, Sig: SigToolCall(tool, args), Name: tool, CallID: id},
-		Item{Kind: KindToolResult, Sig: SigString(result), CallID: id},
+		Item{Kind: KindToolResult, Sig: SigString(result), CallID: id, Head: Head(result)},
 	)
+	return c
+}
+
+// together adds several tool calls made in one model turn, then their results.
+// Each entry is {tool, args, result}.
+func (c *conv) together(calls ...[3]string) *conv {
+	ids := make([]string, len(calls))
+	for i, call := range calls {
+		c.n++
+		ids[i] = fmt.Sprintf("call_%d", c.n)
+		c.items = append(c.items, Item{Kind: KindToolCall, Sig: SigToolCall(call[0], call[1]), Name: call[0], CallID: ids[i]})
+	}
+	for i, call := range calls {
+		c.items = append(c.items, Item{Kind: KindToolResult, Sig: SigString(call[2]), CallID: ids[i], Head: Head(call[2])})
+	}
 	return c
 }
 
@@ -198,6 +213,413 @@ func TestHumanMessageBreaksALoop(t *testing.T) {
 	c.user("the file is called config.yml, not missing.yaml")
 	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
 		t.Fatalf("a new user message should clear the loop, got %+v", f)
+	}
+}
+
+// ---- loops that do not repeat back to back ----
+
+func TestNoProgressSeesALoopThroughAHarnessSayingContinue(t *testing.T) {
+	// What a real model did in the study: poll, report, get told to continue, poll again.
+	// The model rewords its report each time, so nothing repeats back to back.
+	cfg := DefaultConfig().Loops
+	const push = "Continue. The task is not finished yet."
+	c := newConv()
+	for i := 1; i <= 2; i++ {
+		c.step("check_job", `{"job_id":"42"}`, `{"status":"running"}`).
+			asst(fmt.Sprintf("Still running after check %d. I will stop here.", i)).
+			user(push)
+	}
+	// One new poll, one repeat of it, and two replies the harness would not accept.
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("3 turns with nothing new is under the threshold of 5, got %+v", f)
+	}
+	c.step("check_job", `{"job_id":"42"}`, `{"status":"running"}`).asst("Check 3 says the same.").user(push)
+	f := detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 5 || f.Action != ActionNudge {
+		t.Fatalf("want no_progress x5 nudge, got %+v", f)
+	}
+	if !strings.Contains(f.Reason(), "check_job") || !strings.Contains(f.NudgeText(""), "your last 5 turns") {
+		t.Fatalf("reason and notice should name the tool and the count: %q / %q", f.Reason(), f.NudgeText(""))
+	}
+	c.step("check_job", `{"job_id":"42"}`, `{"status":"running"}`).asst("Check 4. Nothing has changed.").user(push).
+		step("check_job", `{"job_id":"42"}`, `{"status":"running"}`)
+	f = detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 8 || f.Action != ActionBlock || !f.Escalated {
+		t.Fatalf("want no_progress x8 escalated to block, got %+v", f)
+	}
+}
+
+func TestNoProgressWhenTheModelStopsAndTheHarnessWillNotLetIt(t *testing.T) {
+	// The other thing a real model did: after the guard's notice it stopped calling tools
+	// and said so, in new words each time, and the harness kept sending the same message.
+	cfg := DefaultConfig().Loops
+	c := newConv().
+		step("read_file", `{"path":"a.go"}`, "package a").
+		step("edit_file", `{"path":"a.go"}`, "ok").
+		step("run_tests", `{}`, "ok: 12 passed")
+	for i := 1; i <= 5; i++ {
+		c.asst(fmt.Sprintf("The work is complete (%d).", i)).user("Continue.")
+	}
+	f := detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 5 || len(f.Tools) != 0 {
+		t.Fatalf("want no_progress x5 with no tools, got %+v", f)
+	}
+	if !strings.Contains(f.Reason(), "ended the turn") || !strings.Contains(f.NudgeText(""), "last 5 replies") {
+		t.Fatalf("reason and notice should describe the replies: %q / %q", f.Reason(), f.NudgeText(""))
+	}
+}
+
+func TestNoProgressLeavesAChatWithNoToolsAlone(t *testing.T) {
+	// A person asking for a long answer in parts. No tools, so this is not an agent.
+	c := (&conv{}).user("Write a long story about a lighthouse.")
+	for i := 1; i <= 9; i++ {
+		c.asst(fmt.Sprintf("Part %d of the story.", i)).user("continue")
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("a chat with no tool calls is not a stalled agent, got %+v", f)
+	}
+}
+
+func TestNoProgressLeavesAHarnessLoopThatIsGettingWorkDoneAlone(t *testing.T) {
+	// An autonomous loop that works: each time it is told to continue, the agent does
+	// something it had not done before, and it succeeds.
+	c := newConv()
+	for i := 1; i <= 12; i++ {
+		c.step("edit_file", fmt.Sprintf(`{"path":"f%d.go"}`, i), "ok").
+			step("run_tests", `{}`, "ok: 12 passed").
+			asst(fmt.Sprintf("Part %d is done.", i)).
+			user("Continue.")
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("new successful work between stops is progress, got %+v", f)
+	}
+}
+
+func TestAFailedAttemptNeitherCountsNorResets(t *testing.T) {
+	cfg := DefaultConfig().Loops
+	// Guess a file name, fail, guess another: new calls every time, and none of them works.
+	c := newConv().step("list_files", `{}`, "README.md")
+	for i := 1; i <= 20; i++ {
+		c.step("read_file", fmt.Sprintf(`{"path":"guess%d.yaml"}`, i), fmt.Sprintf("error: guess%d.yaml: no such file or directory", i))
+	}
+	// Failure is read from free text, so the model is not told and nothing is blocked. The
+	// operator sees it.
+	f := detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleRepeatFailure || f.Action != ActionWarn || f.Count != 20 {
+		t.Fatalf("want repeat_failure x20 as a warning only, got %+v", f)
+	}
+	cfg.RepeatFailure.Enabled = boolPtr(false)
+	if f = detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("failed attempts are not counted by no_progress, got %+v", f)
+	}
+	// They do not reset it either: five replies the harness will not accept, with a failed
+	// guess between each, are five turns with nothing new.
+	for i := 21; i <= 25; i++ {
+		c.asst(fmt.Sprintf("I cannot find the file (%d).", i)).user("Continue.").
+			step("read_file", fmt.Sprintf(`{"path":"guess%d.yaml"}`, i), fmt.Sprintf("error: guess%d.yaml: no such file or directory", i))
+	}
+	if f = detectLoops(elements(c.items), cfg); f == nil || f.Rule != RuleNoProgress || f.Count != 5 || f.Action != ActionNudge {
+		t.Fatalf("want no_progress x5, got %+v", f)
+	}
+	// One new call that works, and the count starts again.
+	c.step("read_file", `{"path":"settings.yaml"}`, "host: db.internal")
+	if f = detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("a new call that works is progress, got %+v", f)
+	}
+}
+
+func TestNoProgressIgnoresRepeatsWithNewWorkBetween(t *testing.T) {
+	// A healthy session: every edit is new, and the tests give the same answer each time.
+	c := newConv()
+	for i := 1; i <= 9; i++ {
+		c.step("edit_file", fmt.Sprintf(`{"path":"f%d.go"}`, i), "ok").
+			step("run_tests", `{}`, "ok: 12 passed")
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("new work between repeats is progress, got %+v", f)
+	}
+}
+
+func TestNoProgressCountsFromTheLastNewThing(t *testing.T) {
+	c := newConv().
+		step("list_files", `{}`, "a.go").
+		step("read_file", `{"path":"a.go"}`, "package a").
+		step("grep", `{"q":"TODO"}`, "a.go:3")
+	// Now the agent revisits what it has already tried, in no regular order.
+	for _, tool := range []string{"list", "grep", "read", "read"} {
+		c.revisit(tool)
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("4 revisits is under the threshold of 5, got %+v", f)
+	}
+	c.revisit("list")
+	f := detectLoops(elements(c.items), DefaultConfig().Loops)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 5 {
+		t.Fatalf("want no_progress x5 on the fifth revisit, got %+v", f)
+	}
+	if got := toolList(f.Tools); got != "list_files, grep, read_file" {
+		t.Fatalf("tools should be listed once each, oldest first: %q", got)
+	}
+}
+
+func (c *conv) revisit(tool string) *conv {
+	switch tool {
+	case "list":
+		return c.step("list_files", `{}`, "a.go")
+	case "read":
+		return c.step("read_file", `{"path":"a.go"}`, "package a")
+	}
+	return c.step("grep", `{"q":"TODO"}`, "a.go:3")
+}
+
+func TestNoProgressResetsWhenAPersonSaysSomethingNew(t *testing.T) {
+	c := newConv()
+	for i := 1; i <= 7; i++ {
+		c.step("check_job", `{"job_id":"42"}`, `{"status":"running"}`).asst(fmt.Sprintf("Check %d.", i)).user("Continue.")
+	}
+	c.user("The job id is 43, not 42.").step("check_job", `{"job_id":"42"}`, `{"status":"running"}`)
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("a new message from a person starts a new episode, got %+v", f)
+	}
+}
+
+func TestTheFirstContinueLooksLikeAPersonUntilItRepeats(t *testing.T) {
+	els := elements(newConv().step("a", `{}`, "x").user("Continue.").step("a", `{}`, "x").items)
+	if got := episodeStart(els); got != 3 {
+		t.Fatalf("one \"Continue.\" is a new message: want episode start 3, got %d", got)
+	}
+	els = elements(newConv().step("a", `{}`, "x").user("Continue.").step("a", `{}`, "x").user("Continue.").step("a", `{}`, "x").items)
+	if got := episodeStart(els); got != 1 {
+		t.Fatalf("a repeated \"Continue.\" is automated: want episode start 1, got %d", got)
+	}
+}
+
+func TestNoProgressSeesAFixThatLeavesTheSameFailure(t *testing.T) {
+	// What a real model did in the study: edit, run the tests, get the same failure, edit
+	// again. Every edit is new and "works", so nothing repeats, but nothing is fixed either.
+	cfg := DefaultConfig().Loops
+	const fail = "FAIL: TestParse: expected 3 items, got 4 (1 of 12 tests failed)"
+	attempt := func(c *conv, i int) *conv {
+		return c.step("edit_file", fmt.Sprintf(`{"path":"parser.go","content":"attempt %d"}`, i), "ok")
+	}
+	c := newConv().
+		step("run_tests", `{}`, fail).
+		step("read_file", `{"path":"parser.go"}`, "package main")
+	for i := 1; i <= 4; i++ {
+		attempt(c, i).step("run_tests", `{}`, fail)
+	}
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("the same failure coming back 4 times is under the threshold of 5, got %+v", f)
+	}
+	attempt(c, 5).step("run_tests", `{}`, fail)
+	f := detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 5 || toolList(f.Tools) != "run_tests" {
+		t.Fatalf("want no_progress x5 naming run_tests, got %+v", f)
+	}
+	// A sixth edit might be the one that works, so the guard waits for the tests. They fail
+	// the same way: the edit did not reset anything.
+	attempt(c, 6)
+	if f = detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("a new edit is given the benefit of the doubt until the tests run, got %+v", f)
+	}
+	c.step("run_tests", `{}`, fail)
+	if f = detectLoops(elements(c.items), cfg); f == nil || f.Rule != RuleNoProgress || f.Count != 6 || f.Action != ActionNudge {
+		t.Fatalf("want no_progress x6: the sixth edit left the failure where it was, got %+v", f)
+	}
+	for i := 7; i <= 8; i++ {
+		attempt(c, i).step("run_tests", `{}`, fail)
+	}
+	if f = detectLoops(elements(c.items), cfg); f == nil || f.Action != ActionBlock || f.Count != 8 {
+		t.Fatalf("want a block when the same failure has come back 8 times, got %+v", f)
+	}
+	// Now the tests pass: that is new, and it worked.
+	attempt(c, 9).step("run_tests", `{}`, "ok: 12 of 12 tests passed")
+	if f = detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("a different result is progress, got %+v", f)
+	}
+}
+
+func TestNoProgressSeesAFixAndItsTestRunInOneTurn(t *testing.T) {
+	// Models often write the edit and the test run in the same turn. They still run in order.
+	const fail = "FAIL: TestParse: expected 3 items, got 4 (1 of 12 tests failed)"
+	c := newConv().step("run_tests", `{}`, fail)
+	for i := 1; i <= 5; i++ {
+		c.together([3]string{"edit_file", fmt.Sprintf(`{"content":"attempt %d"}`, i), "ok"}, [3]string{"run_tests", `{}`, fail})
+	}
+	f := detectLoops(elements(c.items), DefaultConfig().Loops)
+	if f == nil || f.Rule != RuleNoProgress || f.Count != 5 {
+		t.Fatalf("want no_progress x5, got %+v", f)
+	}
+	// A new call written after the failing run in the same turn has not been judged yet.
+	c.together([3]string{"run_tests", `{}`, fail}, [3]string{"read_file", `{"path":"fixture.txt"}`, "a,b,c,"})
+	if f = detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("a new successful call after the failure is progress, got %+v", f)
+	}
+}
+
+func TestNoProgressLeavesAFailureThatKeepsChangingAlone(t *testing.T) {
+	// Real debugging: the suite fails on every run, but with fewer failures each time.
+	c := newConv()
+	for i := 14; i >= 1; i-- {
+		c.step("edit_file", fmt.Sprintf(`{"path":"f%d.go"}`, i), "ok").
+			step("run_tests", `{}`, fmt.Sprintf("FAIL: %d of 40 tests failed", i))
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("a failure that changes on every run is progress being made, got %+v", f)
+	}
+}
+
+func TestStalledRulesCountTurnsNotCalls(t *testing.T) {
+	cfg := DefaultConfig().Loops
+	// One turn that reads nine files it has read before is one turn with nothing new.
+	c := newConv()
+	var again [][3]string
+	for i := 1; i <= 9; i++ {
+		call := [3]string{"read_file", fmt.Sprintf(`{"path":"f%d.go"}`, i), fmt.Sprintf("package f%d", i)}
+		c.step(call[0], call[1], call[2])
+		again = append(again, call)
+	}
+	c.together(again...)
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("one turn of re-reads counts once, got %+v", f)
+	}
+	// One turn that guesses nine file names at once is one turn of failures.
+	c = newConv()
+	var guesses [][3]string
+	for i := 1; i <= 9; i++ {
+		guesses = append(guesses, [3]string{"read_file", fmt.Sprintf(`{"path":"guess%d.yaml"}`, i), fmt.Sprintf("error: guess%d.yaml: no such file or directory", i)})
+	}
+	c.together(guesses...)
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("nine failures in one turn count once, got %+v", f)
+	}
+	// A turn in which a new call works is progress, whatever else was in it.
+	c = newConv().step("check_job", `{}`, "running")
+	for i := 1; i <= 6; i++ {
+		c.together([3]string{"check_job", `{}`, "running"}, [3]string{"read_log", fmt.Sprintf(`{"page":%d}`, i), fmt.Sprintf("log page %d", i)})
+	}
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("a new successful call in the same turn is progress, got %+v", f)
+	}
+}
+
+func TestRepeatFailureWithDifferentArguments(t *testing.T) {
+	// One tool keeps failing on new guesses while other tools keep working, so no_progress
+	// has nothing to say.
+	cfg := DefaultConfig().Loops
+	c := newConv().step("read_file", `{"path":"parser.go"}`, "package main")
+	round := func(i int) {
+		c.step("list_dir", fmt.Sprintf(`{"path":"dir%d"}`, i), fmt.Sprintf("dir%d/a.go", i)).
+			step("read_file", fmt.Sprintf(`{"path":"fixture%d.txt"}`, i), fmt.Sprintf("error: fixture%d.txt: no such file or directory", i))
+	}
+	for i := 1; i <= 7; i++ {
+		round(i)
+	}
+	if f := detectLoops(elements(c.items), cfg); f != nil {
+		t.Fatalf("7 failures is under the threshold of 8, got %+v", f)
+	}
+	round(8)
+	f := detectLoops(elements(c.items), cfg)
+	if f == nil || f.Rule != RuleRepeatFailure || f.Count != 8 || f.Action != ActionWarn {
+		t.Fatalf("want repeat_failure x8 as a warning, got %+v", f)
+	}
+	if !strings.Contains(f.NudgeText(""), "read_file has failed in each of the last 8 turns") {
+		t.Fatalf("notice should name the tool and count: %q", f.NudgeText(""))
+	}
+	for i := 9; i <= 30; i++ {
+		round(i)
+	}
+	if f = detectLoops(elements(c.items), cfg); f == nil || f.Action != ActionWarn || f.Count != 30 {
+		t.Fatalf("by default repeat_failure only reports, got %+v", f)
+	}
+	cfg.RepeatFailure.Action = ActionNudge
+	cfg.RepeatFailure.EscalateAfter = 6
+	if f = detectLoops(elements(c.items), cfg); f == nil || f.Action != ActionBlock || !f.Escalated {
+		t.Fatalf("with escalate_after set it blocks, got %+v", f)
+	}
+}
+
+func TestRepeatFailureResetsWhenTheToolSucceeds(t *testing.T) {
+	c := newConv()
+	round := func(i int) {
+		c.step("list_dir", fmt.Sprintf(`{"path":"dir%d"}`, i), fmt.Sprintf("dir%d/a.go", i)).
+			step("read_file", fmt.Sprintf(`{"path":"guess%d.txt"}`, i), "error: no such file or directory")
+	}
+	for i := 1; i <= 7; i++ {
+		round(i)
+	}
+	c.step("read_file", `{"path":"found.txt"}`, "the fixture")
+	for i := 8; i <= 12; i++ {
+		round(i)
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("a success in between resets the count, got %+v", f)
+	}
+}
+
+func TestRepeatFailureIgnoresACallMadeAgain(t *testing.T) {
+	// The same call failing differently each time is things moving, not variations failing.
+	c := newConv()
+	for i := 12; i >= 1; i-- {
+		c.step("list_dir", fmt.Sprintf(`{"path":"dir%d"}`, i), fmt.Sprintf("dir%d/a.go", i)).
+			step("run_tests", `{}`, fmt.Sprintf("FAIL: %d of 40 tests failed", i))
+	}
+	if f := detectLoops(elements(c.items), DefaultConfig().Loops); f != nil {
+		t.Fatalf("want nothing, got %+v", f)
+	}
+}
+
+func TestNewRulesCanBeTurnedOffAndRespectIgnoredTools(t *testing.T) {
+	c := newConv()
+	for i := 1; i <= 9; i++ {
+		c.step("check_job", `{"job_id":"42"}`, `{"status":"running"}`).asst(fmt.Sprintf("Check %d.", i)).user("Continue.")
+	}
+	els := elements(c.items)
+	off := DefaultConfig().Loops
+	off.NoProgress.Enabled = boolPtr(false)
+	if f := detectLoops(els, off); f != nil {
+		t.Fatalf("no_progress is off, got %+v", f)
+	}
+	ignored := DefaultConfig().Loops
+	ignored.IgnoreTools = []string{"check_job"}
+	if f := detectLoops(els, ignored); f != nil {
+		t.Fatalf("check_job is ignored, got %+v", f)
+	}
+}
+
+func TestLooksLikeFailure(t *testing.T) {
+	for _, s := range []string{
+		"error: config.yaml: no such file or directory",
+		"  Error: connection refused",
+		"FAIL: TestParse: expected 3 items, got 4",
+		"Traceback (most recent call last):",
+		`{"error":"not found"}`,
+		`{ "error": {"code": 404} }`,
+		`{"errors":["bad request"]}`,
+		"bash: foo: command not found",
+		"cat: x: No such file or directory",
+		"Command exited with exit status 1",
+	} {
+		if !LooksLikeFailure(s) {
+			t.Errorf("should read as a failure: %q", s)
+		}
+	}
+	for _, s := range []string{
+		"ok",
+		"package main",
+		`{"job_id":"42","status":"running"}`,
+		`{"error":null,"data":[1,2,3]}`,
+		`{"error": false, "ok": true}`,
+		`{"errors":[],"rows":4}`,
+		`{"error_count":0}`,
+		"12 tests passed, 0 failed",
+		"README.md\nmain.go",
+		"",
+		"The error handling in this file is in handle.go",
+	} {
+		if LooksLikeFailure(s) {
+			t.Errorf("should not read as a failure: %q", s)
+		}
 	}
 }
 

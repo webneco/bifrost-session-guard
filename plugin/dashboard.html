@@ -229,6 +229,8 @@ function describeRules(c) {
   if (cy.action !== "block" && cy.escalate_after > 0) cyText += ` Block after ${cy.repeats + cy.escalate_after}.`;
   out.push(ruleLine("Repeating sequence of steps", on(cy), cyText));
   out.push(ruleLine("Same reply from the model", on(L.repeat_output), loop(L.repeat_output, "in a row")));
+  if (L.no_progress) out.push(ruleLine("Turn after turn, nothing new works", on(L.no_progress), loop(L.no_progress, "turns")));
+  if (L.repeat_failure) out.push(ruleLine("One tool keeps failing on new attempts", on(L.repeat_failure), loop(L.repeat_failure, "turns")));
   const rr = L.repeat_request;
   out.push(ruleLine("Unchanged conversation resent", on(rr), `After ${rr.threshold} answered resends within ${span(rr.window)}, ${act(rr.action)}.`));
 
