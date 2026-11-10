@@ -4,11 +4,12 @@
 #   make all       build the plugin-capable gateway and the plugin
 #   make e2e       end-to-end tests against the real gateway
 #   make demo      the before/after demo, no API keys needed
+#   make study     real models, guard on against dry run (needs ANTHROPIC_API_KEY; see study/README.md)
 #   make e2e-builtin   the same end-to-end tests against a gateway with the guard compiled in
 
 export GOWORK := off
 
-.PHONY: all gateway plugin gateway-builtin test bench e2e e2e-builtin demo sync clean
+.PHONY: all gateway plugin gateway-builtin test bench e2e e2e-builtin demo study sync clean
 
 all: gateway plugin
 
@@ -35,6 +36,9 @@ e2e-builtin: gateway-builtin ## End-to-end tests against the gateway with the gu
 
 demo: gateway plugin ## Before/after demo with a looping agent
 	@demo/run.sh
+
+study: gateway plugin ## Real models through two gateways, guard on and dry run. Costs about 3 million tokens.
+	@study/run.sh
 
 sync: ## Re-pin dependencies to the Bifrost version in BIFROST_VERSION
 	@scripts/sync-deps.sh

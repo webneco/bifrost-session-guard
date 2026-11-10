@@ -8,7 +8,7 @@ Built for the Global AI Hackathon, Bifrost track, problem statement 04 ("Build a
 
 ## The problem
 
-Agents get stuck. A coding agent re-reads a file that does not exist, or edits a file, runs the tests, sees the same failure and edits it the same way again. Each turn resends the whole conversation, so a stuck agent is also an expensive one.
+Agents get stuck. A coding agent re-reads a file that does not exist, or edits a file, runs the tests, sees the same failure and edits again. Unattended agents are worse: the program driving the agent answers every "I cannot finish this" with "continue", and the session never ends. Each turn resends the whole conversation, so a stuck session is also an expensive one.
 
 Bifrost can cap spend, but its budgets and rate limits belong to a virtual key, a team, a provider or a model. None of them belongs to a session. So when one agent loops:
 
@@ -22,12 +22,30 @@ Bifrost already knows which session a request belongs to. It reads `x-bf-session
 It watches each session on its own and steps in for that session only.
 
 - **Finds loops.** The same tool call returning the same result, a sequence of steps going round in circles, the model giving the same reply, or a client resending an unchanged conversation.
+- **Finds sessions that are going nowhere.** Turn after turn with nothing new: calls that return what they returned before, a fix that leaves the same failure in place, or a model that keeps saying it is finished while its harness keeps telling it to continue. Nothing in such a session repeats back to back, so a simple repeat counter misses it.
 - **Tells the model first.** At the first sign of a loop it adds a short notice to the system prompt, saying what is repeating and that repeating it will not help. That gives the model a chance to change course by itself.
 - **Blocks if that fails.** If the loop continues, the session gets an error that client libraries do not retry by default. Other sessions on the same key carry on.
 - **Caps a session.** Optional limits on requests, tokens, cost and duration for one session.
 - **Shows what it did.** Response headers on every request, a line in Bifrost's own request log, and a small status page.
 
 No client changes are needed. Sessions come from the headers Bifrost already understands. When a request has none, the guard identifies the conversation by how it opened.
+
+## Tested on real models
+
+The demo below uses a scripted model so that it costs nothing. The guard was also run against Claude Haiku 5.5 and Claude Sonnet 5.5 through a real Bifrost gateway: 96 sessions, with the guard on and in dry run as the baseline. The full write-up is in [study/](study/README.md).
+
+| What was tested | Without the guard (dry run) | With the guard |
+| --- | --- | --- |
+| A stuck agent, left to itself (36 sessions) | All 18 stopped by themselves | All 18 stopped by themselves |
+| A stuck agent under a harness that answers every stop with "Continue" (36 sessions) | 0 of 18 stopped; all ran to the 24-turn limit | 16 of 18 blocked |
+| Tokens per session under that harness | 82,122 | 42,792 (48% fewer) |
+| Healthy tasks that can be finished (24 sessions) | 12 of 12 finished | 0 notices, 0 blocks; 11 of 12 finished |
+
+Three things came out of it:
+
+- **These models stop by themselves.** A stuck tool alone did not produce a runaway session. The runaway sessions came from the harness: the models tried to stop nine times per session on average and were told to continue each time.
+- **The rules this project started with did not stop those sessions.** Nothing in them repeats back to back. The `no_progress` rule was written because of that result, and all 16 blocks came from it.
+- **The guard is slow on an agent that keeps trying new things that fail.** In the failing-test scenario it blocked 4 of 6 sessions, and late. It can only tell that a call failed by reading the result text, so it reports those failures and does not act on them. An earlier version that did act on them talked a model out of a task it could have finished; the study has the numbers. Session limits are the backstop.
 
 ## Run the demo
 
@@ -98,7 +116,7 @@ The Docker command leaves the guarded gateway running, as does `demo/run.sh --ke
 | Real operator problem, solved end to end | One stuck session can drain a shared budget and lock out a team. The guard detects it, intervenes, reports it and lets an operator reset it. |
 | Public extension points | A standard Bifrost plugin. It uses `PreLLMHook`, `PostLLMHook` and the HTTP transport hooks, and nothing private. It imports only Bifrost's `core/schemas` package. |
 | Reproducible integration with clear setup | One command builds a plugin-capable gateway from Bifrost's own source at a pinned release (v2.5.0), builds the plugin and checks the two against each other. `make demo` and `make e2e` then run against that gateway. See the note on builds below. |
-| Tests, documentation, ready for an upstream pull request | 51 unit tests, 13 end-to-end tests against the real gateway, benchmarks, this README, a [configuration reference](docs/configuration.md) and an [upstream plan](docs/upstream.md). A 20-line patch registers the guard as a built-in; with it, the same 13 tests pass on a statically linked gateway. |
+| Tests, documentation, ready for an upstream pull request | 69 unit tests, 16 end-to-end tests against the real gateway, benchmarks, a [study with real models](study/README.md), this README, a [configuration reference](docs/configuration.md) and an [upstream plan](docs/upstream.md). A 20-line patch registers the guard as a built-in; with it, the same 16 tests pass on a statically linked gateway. |
 
 **A note on builds.** The gateway binary Bifrost publishes is statically linked and cannot load any custom plugin. Bifrost's documentation asks plugin users to build the gateway with dynamic linking, and that is what `make gateway` and the Dockerfile do, from unmodified Bifrost source. Go also refuses to load a plugin unless every package it shares with the gateway is the same version. `scripts/build-plugin.sh` compares the two binaries and names any package that differs, so that mistake fails at build time with a clear message.
 
@@ -146,6 +164,9 @@ The settings you are most likely to change. The [configuration reference](docs/c
 | `loops.repeat_tool_call.action` | `"nudge"` | `"warn"`, `"nudge"` or `"block"`. |
 | `loops.repeat_tool_call.escalate_after` | `3` | Block after this many more repeats. `0` never blocks. |
 | `loops.tool_cycle.repeats` | `3` | Times a sequence of steps must repeat. |
+| `loops.no_progress.threshold` | `5` | Turns in a row with nothing new before the guard tells the model. |
+| `loops.no_progress.escalate_after` | `3` | Block after this many more. `0` never blocks. |
+| `loops.repeat_failure.action` | `"warn"` | One tool failing on new attempts, turn after turn. Reported only, unless set to `"nudge"`. |
 | `loops.ignore_tools` | none | Tools that may repeat freely, such as `wait` or a status poll. |
 | `session.fallback` | `"fingerprint"` | What to do with a request that has no session header. `"none"` leaves it unguarded. |
 | `session.idle_ttl` | `"2h"` | How long an idle session is remembered. |
@@ -163,6 +184,14 @@ The settings you are most likely to change. The [configuration reference](docs/c
 
 A tool call counts as "the same" when the tool name matches and the JSON arguments differ only in whitespace or in the order of top-level keys. The text an assistant writes around a tool call is ignored, because models reword it ("let me try again") while repeating the same call.
 
+**Progress, not only repetition.** Real sessions that go nowhere rarely repeat back to back, so a second pass walks the conversation backwards and counts the turns since something new last worked. A turn makes progress when one of its tool calls is new and did not fail. Three details matter:
+
+- A reply that ends the turn, answered by a message the caller has sent before word for word, is a turn with nothing new. That is the signature of an unattended harness, and it is how the guard sees a loop that is in the harness and not in the model.
+- A new call that works but leaves a failure exactly as it was is not progress. If the tests fail with the same output after an edit, the edit did not fix them, however new it was.
+- Evidence read from the wording of a tool result (that it "looks like an error") is never enough to interrupt the model or block. Only the structure of the conversation is.
+
+The count restarts at the last message a person wrote, and a conversation with no tool calls is never counted.
+
 **The nudge.** For a chat request the notice is appended to the system message. For a Responses request it goes into `instructions`. The caller's own messages are never modified; the guard works on a copy. Anthropic-format requests arrive in Bifrost as Responses requests and are handled the same way.
 
 **The block.** A loop is refused with HTTP 403 and a limit with 402, the status Bifrost's own budgets use. Client libraries retry 429 and 5xx responses, so those would only make a stuck agent hammer the gateway. Fallback to other providers is switched off for a blocked request.
@@ -178,6 +207,7 @@ A tool call counts as "the same" when the tool name matches and the JSON argumen
 | Loop detection | Plain Go with FNV-1a and `hash/maphash` signatures. No model, database or external service is involved. |
 | Status page and API | Go's `net/http`, with one embedded page of plain HTML, CSS and JavaScript. No front-end framework. |
 | Demo and end-to-end tests | Node.js 22 with its built-in test runner and no npm packages: a scripted OpenAI-compatible mock provider and a small tool-calling agent |
+| Study with real models | Claude Haiku 5.5 and Claude Sonnet 5.5 through Anthropic's API, routed by Bifrost; the agent and its report are one Node.js script |
 | Build and packaging | Bash scripts, Make and a multi-stage Dockerfile |
 | Continuous integration | GitHub Actions: unit tests, end-to-end tests, the demo and the Docker image on every push |
 | AI coding tool | Claude (Anthropic). See [How AI was used](#how-ai-was-used). |
@@ -227,19 +257,23 @@ Set `status.listen` to turn them on. They run on their own listener, so they wor
 ## Tests
 
 ```bash
-make test          # 51 unit tests with the race detector, no gateway needed
-make e2e           # 13 tests against the real gateway with the plugin loaded
-make e2e-builtin   # the same 13 tests with the guard compiled into the gateway
+make test          # 69 unit tests with the race detector, no gateway needed
+make e2e           # 16 tests against the real gateway with the plugin loaded
+make e2e-builtin   # the same 16 tests with the guard compiled into the gateway
 make bench
 ```
 
-The end-to-end tests start Bifrost v2.5.0 with the plugin loaded and drive it with scripted agents. They cover OpenAI-style chat, streamed chat, the Responses API, Anthropic-format requests, header and fingerprint sessions, isolation between sessions, resending a blocked conversation, dry run, session limits and the status API.
+The end-to-end tests start Bifrost v2.5.0 with the plugin loaded and drive it with scripted agents. They cover OpenAI-style chat, streamed chat, the Responses API, Anthropic-format requests, header and fingerprint sessions, isolation between sessions, resending a blocked conversation, a loop driven by a harness, a fix that leaves the same failure, dry run, session limits and the status API.
 
-Measured on a 2-vCPU cloud VM (Xeon, 2.1 GHz): the pre-hook takes about 50 microseconds for a 400-message conversation whose tool results are 2 KB each, and the decision engine alone about 10 microseconds. Only the last 160 items of a conversation are examined, so the cost does not grow with conversation length.
+The [study](study/README.md) is separate, because it needs an API key: real models, stuck and healthy tasks, guard on against dry run.
+
+Measured on a 2-vCPU cloud VM (Xeon, 2.1 GHz): the pre-hook takes about 55 microseconds for a 400-message conversation whose tool results are 2 KB each, and the decision engine alone about 16 microseconds. Only the last 160 items of a conversation are examined, so the cost does not grow with conversation length.
 
 ## Limits
 
-- **The nudge is untested on real models.** Every run so far used the scripted mock, which is written to change course when it reads the notice. How often a real model does has not been measured. The block does not depend on it.
+- **Tested on two models from one vendor.** The [study](study/README.md) used Claude Haiku 5.5 and Claude Sonnet 5.5, three trials per case, with synthetic tools. It shows a pattern, not a rate, and other models may behave differently.
+- **An agent that keeps trying new things is not stopped quickly.** Guessing 70 file names is 70 new calls. The guard reports the run of failures and leaves the model alone, because it reads failure from free text and acting on that did harm in the study. Set a session limit for this.
+- **A harness is recognised by its repeated message.** The guard treats a user message that repeats an earlier one word for word as automated. A supervisor that writes a different message each time looks like a person, so the count restarts and only session limits apply. A person who sends the same short message several times to an agent that is doing nothing new will, in time, be treated as a harness.
 - **Counters live in memory, per gateway process.** Loop detection is stateless and works across replicas. Session limits and the status page see only the requests that reached that replica, so exact per-session limits across replicas need sticky routing at the load balancer. A restart clears the counters.
 - **Fingerprint sessions group identical openings.** Without a session header, requests with the same system prompt and first user message count as one session. Loop detection is unaffected, because it reads each request's own history. Session limits would add such requests together, so set `session.fallback` to `"none"` if you use limits and have a service that sends one fixed prompt.
 - **Results that differ only by noise.** A tool result with a timestamp or request id in it is a different result each time. A second, looser rule catches the same call repeating ten times whatever it returns.
@@ -254,7 +288,7 @@ As a built-in plugin, the guard would work on Bifrost's standard binary with one
 
 ```bash
 make gateway-builtin          # a gateway with the guard compiled in
-STATIC=1 make e2e-builtin     # the 13 end-to-end tests, on a statically linked build
+STATIC=1 make e2e-builtin     # the 16 end-to-end tests, on a statically linked build
 ```
 
 [docs/upstream.md](docs/upstream.md) covers what a pull request would contain and the questions it leaves to the maintainers.
